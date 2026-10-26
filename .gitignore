@@ -1,0 +1,6 @@
+node_modules/
+.next/
+apps/control/.next-test/
+dist/
+.npm-cache/
+*.tsbuildinfo

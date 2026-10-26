@@ -1,0 +1,109 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Workspace {
+  id          String            @id @default(uuid()) @db.Uuid
+  name        String
+  sites       Site[]
+  operations  PublishOperation[]
+  createdAt   DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime          @updatedAt @db.Timestamptz(6)
+}
+
+model Site {
+  id             String            @id @default(uuid()) @db.Uuid
+  workspaceId    String            @db.Uuid
+  workspace      Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  templatePins   TemplatePin[]
+  releases       Release[]
+  domains        Domain[]
+  operations     PublishOperation[]
+  deployments    ActiveDeployment[]
+  desiredRevision Int             @default(0)
+  desiredReleaseId String?
+  credentialHash String?
+  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime          @updatedAt @db.Timestamptz(6)
+
+  @@unique([workspaceId, id])
+  @@index([workspaceId])
+}
+
+model TemplatePin {
+  id          String   @id @default(uuid()) @db.Uuid
+  siteId      String   @db.Uuid
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  templateId  String
+  version     String
+  imageDigest String
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([siteId, templateId])
+}
+
+model Release {
+  id          String   @id @default(uuid()) @db.Uuid
+  siteId      String   @db.Uuid
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  releaseId   String
+  checksum    String
+  metadata    Json
+  snapshotRef String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([siteId, releaseId])
+}
+
+model Domain {
+  id                 String   @id @default(uuid()) @db.Uuid
+  siteId             String   @db.Uuid
+  site               Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  hostname           String   @unique
+  status             String   @default("pending")
+  certificateStatus  String   @default("pending")
+  createdAt          DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @db.Timestamptz(6)
+}
+
+model PublishOperation {
+  id             String   @id @default(uuid()) @db.Uuid
+  workspaceId    String   @db.Uuid
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  siteId         String   @db.Uuid
+  site           Site     @relation(fields: [workspaceId, siteId], references: [workspaceId, id], onDelete: Restrict)
+  idempotencyKey String
+  releaseId      String
+  expectedRevision Int
+  desiredRevision Int
+  status         String   @default("pending")
+  failureCode    String?
+  leaseOwner     String?
+  leaseUntil     DateTime? @db.Timestamptz(6)
+  attempts       Int      @default(0)
+  candidateCredentialHash String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([siteId, idempotencyKey])
+  @@index([siteId, status])
+  @@index([status, leaseUntil, createdAt], map: "PublishOperation_claim_idx")
+}
+
+model ActiveDeployment {
+  id          String   @id @default(uuid()) @db.Uuid
+  siteId      String   @db.Uuid
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  releaseId   String
+  imageDigest String
+  routeRevision Int    @default(0)
+  activatedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([siteId])
+}
