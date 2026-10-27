@@ -22,3 +22,9 @@
 3. 接入 Traefik、多域名和 HTTP-01，在 Linux 公网环境完成证书、恢复和安全边界验收。
 
 本仓库不包含 CMS 草稿预览、多主机调度、高可用集群或自动模板升级。
+
+## CI 与服务器发布
+
+Gateway 的 CI 在 PR 指向 `master`、推送 `master` 或 `release/vMAJOR.MINOR.PATCH` 分支时运行；也可从 Actions 页面手动运行。验证作业使用 PostgreSQL 18，执行迁移、工作区测试（其中控制台测试会构建 Next.js）和 TypeScript 检查。`master` 用于验证；版本化发布分支通过 `production` 环境构建、验证并部署 GHCR 镜像。
+
+发布镜像按提交 SHA 和版本加提交 SHA 标记，并附带 OCI 修订版本、版本及 GitHub provenance。部署脚本先验证镜像证明，再将不可变镜像 digest 和版本交给现有服务器部署流程。服务器发布需要配置仓库变量 `DEPLOY_HOST`、`DEPLOY_USER`，以及 Secrets `DEPLOY_SSH_KEY`、`DEPLOY_KNOWN_HOSTS`。不要将 SSH 凭据放入变量或仓库文件。

@@ -1,0 +1,116 @@
+name: Gateway release
+
+on:
+  push:
+    branches:
+      - master
+      - 'release/v*'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway-test-only
+          POSTGRES_DB: gateway
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      publish: ${{ steps.release.outputs.publish }}
+    env:
+      DATABASE_URL: postgresql://gateway:gateway-test-only@localhost:5432/gateway
+      GATEWAY_TEST_DATABASE_URL: postgresql://gateway:gateway-test-only@localhost:5432/gateway
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm test
+      - run: npm run typecheck
+      - name: Resolve release metadata
+        id: release
+        run: python3 .github/scripts/release.py
+
+  publish:
+    needs: verify
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: gateway-release-server
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish image
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/tangtianshuo/independent-website-gateway:sha-${{ github.sha }}
+            ghcr.io/tangtianshuo/independent-website-gateway:${{ needs.verify.outputs.version }}-sha-${{ github.sha }}
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
+            RELEASE_VERSION=${{ needs.verify.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/tangtianshuo/Independent-Website-Gateway
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/tangtianshuo/independent-website-gateway
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify published image provenance
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh attestation verify
+          "oci://ghcr.io/tangtianshuo/independent-website-gateway@${IMAGE_DIGEST}"
+          -R tangtianshuo/Independent-Website-Gateway
+          --source-digest "$GITHUB_SHA"
+          --source-ref "$GITHUB_REF"
+      - name: Deploy verified image
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/deploy.sh
