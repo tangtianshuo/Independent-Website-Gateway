@@ -51,6 +51,50 @@ test('sends only approved create, start and forced delete over the private socke
   assert.equal(received[1].body, '');
 });
 
+test('pulls only an exact allowlisted repository digest through the Docker image API', async () => {
+  const received: Array<{ method?: string; url?: string }> = [];
+  await withEngine((request, response) => {
+    received.push({ method: request.method, url: request.url });
+    if (request.url?.startsWith('/images/create?')) { response.writeHead(200); response.end('{"status":"Downloaded"}\n'); }
+    else { response.writeHead(200); response.end(JSON.stringify({ RepoDigests: [image] })); }
+  }, async path => {
+    const client = clientFor(path);
+    await client.pull(image);
+    await assert.rejects(client.pull('ghcr.io/attacker/other@sha256:' + 'b'.repeat(64)), /Unapproved/);
+  });
+  assert.deepEqual(received, [
+    { method: 'POST', url: `/images/create?fromImage=${encodeURIComponent(image)}` },
+    { method: 'GET', url: `/images/${encodeURIComponent(image)}/json` },
+  ]);
+});
+
+test('rejects a pulled image unless Docker confirms the exact repository digest', async () => {
+  await withEngine((_request, response) => { response.writeHead(200); response.end('{"RepoDigests":[]}'); }, async path => {
+    await assert.rejects(clientFor(path).pull(image), /digest mismatch/);
+  });
+});
+
+test('pull wall deadline aborts a progress stream even before its inactivity timeout', async () => {
+  await withEngine((_request, response) => {
+    const progress = setTimeout(() => { response.writeHead(200); response.write('{"status":"Downloading"}\n'); }, 80);
+    response.on('close', () => clearTimeout(progress));
+  }, async path => {
+    const started = performance.now();
+    await assert.rejects(clientFor(path, { timeoutMs: 120 }).pull(image), /timed out/i);
+    assert.ok(performance.now() - started < 180, 'pull exceeded the absolute wall deadline');
+  });
+});
+
+test('pull rejects an HTTP 200 progress error without inspecting or creating a candidate', async () => {
+  const requests: string[] = [];
+  await withEngine((request, response) => {
+    requests.push(request.url!); response.writeHead(200); response.end('{"errorDetail":{"message":"private registry detail"}}\n');
+  }, async path => {
+    await assert.rejects(clientFor(path).pull(image), /Docker image pull failed/);
+  });
+  assert.equal(requests.length, 1);
+});
+
 test('uses validated path and method scalars when request getters change', async () => {
   const received: Array<{ method?: string; url?: string }> = [];
   await withEngine((request, response) => { received.push({ method: request.method, url: request.url }); response.writeHead(201); response.end('{"Id":"safe-id"}'); }, async path => {

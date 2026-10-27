@@ -6,6 +6,7 @@ import { claimPublishOperation } from './claim.js';
 import { deployCandidate } from './deployment.js';
 import { createDockerEngineClient } from './docker-client.js';
 import { createDockerCandidateAdapter } from './docker.js';
+import { pullApprovedImage } from './pull.js';
 import { failPublishOperation, finalizeAfterRouteVerification, persistCandidateCredential } from './operations.js';
 import { checkCandidate, createLocalRouter, type Route } from './runtime.js';
 
@@ -49,17 +50,14 @@ function inspectRoute(socketPath: string, route: Route): Promise<boolean> {
 
 export async function runWorker() {
   const databaseUrl = process.env.DATABASE_URL;
-  const digest = process.env.GATEWAY_APPROVED_IMAGE_DIGEST;
+  const digest = process.env.GATEWAY_APPROVED_IMAGE_DIGEST ?? '';
   const gatewayUrl = process.env.GATEWAY_CONTROL_URL;
   const proxyPort = Number(process.env.GATEWAY_PROXY_PORT ?? 8080);
-  if (!databaseUrl || !digest || !digestPattern.test(digest) ||
+  if (!databaseUrl || (digest !== '' && !digestPattern.test(digest)) ||
       !gatewayUrl || !/^http:\/\/host\.docker\.internal:[1-9][0-9]{0,4}$/.test(gatewayUrl) ||
       !Number.isSafeInteger(proxyPort) || proxyPort < 1024 || proxyPort > 65535) throw new Error('Invalid worker configuration');
   const pool = new Pool({ connectionString: databaseUrl });
-  const image = { repository: 'local', digest };
   const socketPath = process.env.DOCKER_SOCKET_PATH ?? (process.platform === 'win32' ? '//./pipe/docker_engine' : '/var/run/docker.sock');
-  const docker = createDockerEngineClient({ socketPath, approvedImages: [digest] });
-  const adapter = createDockerCandidateAdapter(docker, { network: 'gateway-sites', images: [image] });
   const router = createLocalRouter(process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json', route => inspectRoute(socketPath, route));
   const workerId = randomUUID();
   await pool.query('SELECT 1');
@@ -78,17 +76,39 @@ export async function runWorker() {
       try {
         const claim = await claimPublishOperation(pool, workerId, 180);
         if (claim) {
-          const selected = await pool.query<{ imageDigest: string }>(`
-            SELECT pin."imageDigest" FROM "Release" release JOIN "TemplatePin" pin
+          const selected = await pool.query<{ imageDigest: string; imageRepository: string | null; manifestChecksum: string | null; sourceCommit: string | null }>(`
+            SELECT pin."imageDigest", pin."imageRepository", pin."manifestChecksum", pin."sourceCommit" FROM "Release" release JOIN "TemplatePin" pin
               ON pin."siteId" = release."siteId" AND pin."templateId" = release."metadata"->>'templateId'
               AND pin."version" = release."metadata"->>'templateVersion'
               AND pin."imageDigest" = release."metadata"->>'imageDigest'
             WHERE release."siteId" = $1 AND release."releaseId" = $2 AND release."snapshotRef" IS NOT NULL
-              AND pin."imageDigest" = $3`, [claim.siteId, claim.releaseId, digest]);
+              AND ((pin."imageRepository" IS NULL AND pin."manifestChecksum" IS NULL AND pin."sourceCommit" IS NULL AND pin."imageDigest" = $3)
+                OR (pin."imageRepository" = 'ghcr.io/tangtianshuo/independent-website-templates/' || pin."templateId"
+                  AND pin."manifestChecksum" = release."metadata"->>'manifestChecksum'
+                  AND pin."manifestChecksum" ~ '^sha256:[a-f0-9]{64}$' AND pin."sourceCommit" ~ '^[a-f0-9]{40}$'))`, [claim.siteId, claim.releaseId, digest]);
           if (!selected.rowCount) {
             await failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' });
             continue;
           }
+          const image = selected.rows[0].imageRepository
+            ? { repository: selected.rows[0].imageRepository, digest: selected.rows[0].imageDigest, sourceCommit: selected.rows[0].sourceCommit ?? undefined, manifestChecksum: selected.rows[0].manifestChecksum ?? undefined }
+            : { repository: 'local', digest: selected.rows[0].imageDigest };
+          const remainingLeaseMs = claim.leaseUntil.getTime() - Date.now();
+          const approvedImages = [image.repository === 'local' ? image.digest : `${image.repository}@${image.digest}`];
+          if (image.repository !== 'local') {
+            const pullBudgetMs = Math.min(120_000, remainingLeaseMs - 60_000);
+            if (pullBudgetMs <= 0) {
+              await failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' });
+              continue;
+            }
+            const pullDocker = createDockerEngineClient({ socketPath, timeoutMs: pullBudgetMs, approvedImages });
+            if (!await pullApprovedImage(
+              () => pullDocker.pull(`${image.repository}@${image.digest}`),
+              () => failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' }),
+            )) continue;
+          }
+          const claimDocker = createDockerEngineClient({ socketPath, timeoutMs: Math.min(15_000, Math.max(1, claim.leaseUntil.getTime() - Date.now() - 10_000)), approvedImages });
+          const adapter = createDockerCandidateAdapter(claimDocker, { network: 'gateway-sites', images: [image] });
           const credential = randomBytes(32).toString('hex');
           if (!await persistCandidateCredential(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, credential })) continue;
           let candidatePort = 0;
@@ -117,7 +137,7 @@ export async function runWorker() {
                 return containerId;
               },
               removeCandidate: async containerId => {
-                await docker.request({ method: 'DELETE', path: `/containers/${containerId}?force=true` });
+                await claimDocker.request({ method: 'DELETE', path: `/containers/${containerId}?force=true` });
                 containerPorts.delete(containerId);
               },
               waitHealthy: async containerId => {

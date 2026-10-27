@@ -6,7 +6,7 @@ const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const failureCodes = new Set(['CANDIDATE_CREATE_FAILED', 'CANDIDATE_START_FAILED', 'CANDIDATE_UNHEALTHY', 'ROUTE_SWITCH_FAILED', 'WORKER_INTERNAL_ERROR']);
 
 export interface FailureInput { operationId: string; workerId: string; attempts: number; leaseUntil: Date; failureCode: string }
-export interface FinalizeInput { operationId: string; workerId: string; attempts: number; leaseUntil: Date; imageDigest: string }
+export interface FinalizeInput { operationId: string; workerId: string; attempts: number; leaseUntil: Date; imageDigest: string; imageRepository?: string; sourceCommit?: string; manifestChecksum?: string }
 export interface CredentialInput { operationId: string; workerId: string; attempts: number; leaseUntil: Date; credential: string }
 
 export async function persistCandidateCredential(pool: Pool, input: CredentialInput): Promise<boolean> {
@@ -43,6 +43,10 @@ export async function finalizeAfterRouteVerification(pool: Pool, input: Finalize
   if (!Number.isSafeInteger(input.attempts) || input.attempts < 1) throw new Error('Invalid lease attempt');
   if (!(input.leaseUntil instanceof Date) || !Number.isFinite(input.leaseUntil.getTime())) throw new Error('Invalid lease expiry');
   if (!digestPattern.test(input.imageDigest)) throw new Error('Invalid image digest');
+  const publicImage = input.imageRepository !== undefined;
+  if (publicImage ? !/^ghcr\.io\/tangtianshuo\/independent-website-templates\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(input.imageRepository!) ||
+      !/^[a-f0-9]{40}$/.test(input.sourceCommit ?? '') || !digestPattern.test(input.manifestChecksum ?? '')
+    : input.sourceCommit !== undefined || input.manifestChecksum !== undefined) throw new Error('Invalid public pin identity');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -62,9 +66,12 @@ export async function finalizeAfterRouteVerification(pool: Pool, input: Finalize
         AND pin."templateId" = release."metadata"->>'templateId'
         AND pin."version" = release."metadata"->>'templateVersion'
         AND pin."imageDigest" = release."metadata"->>'imageDigest'
+        AND (($4::text IS NULL AND pin."imageRepository" IS NULL AND pin."manifestChecksum" IS NULL AND pin."sourceCommit" IS NULL)
+          OR ($4::text IS NOT NULL AND pin."imageRepository" = $4 AND pin."sourceCommit" = $5
+            AND pin."manifestChecksum" = $6 AND pin."manifestChecksum" = release."metadata"->>'manifestChecksum'))
       WHERE release."siteId" = $1 AND release."releaseId" = $2
         AND release."snapshotRef" IS NOT NULL AND pin."imageDigest" = $3
-      FOR UPDATE OF release, pin`, [siteId, releaseId, input.imageDigest]);
+      FOR UPDATE OF release, pin`, [siteId, releaseId, input.imageDigest, input.imageRepository ?? null, input.sourceCommit ?? null, input.manifestChecksum ?? null]);
     if (!release.rowCount) return false;
     await client.query(`INSERT INTO "ActiveDeployment" ("id", "siteId", "releaseId", "imageDigest", "routeRevision")
       VALUES ($1, $2, $3, $4, $5)

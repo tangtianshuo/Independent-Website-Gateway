@@ -16,10 +16,17 @@ export interface ReleaseInput {
   snapshot: string;
 }
 
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, item]) => [key, canonicalValue(item)]));
+  }
+  return value;
+}
+
 export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  return JSON.stringify(canonicalValue(value));
 }
 
 export function validateReleaseInput(value: unknown, allowedTemplateIds: string[]): ReleaseInput & { imageDigest: string } {
@@ -33,6 +40,15 @@ export function validateReleaseInput(value: unknown, allowedTemplateIds: string[
   const metadata = input.metadata;
   if (!metadata || typeof metadata !== 'object' || !allowedTemplateIds.includes(metadata.templateId)) throw new Error('Template not allowed');
   if (!metadata.templateVersion || metadata.templateVersion.length > 64 || !digestPattern.test(metadata.manifestChecksum) || !digestPattern.test(metadata.imageDigest)) throw new Error('Invalid template identity');
+  let release: unknown;
+  try { release = JSON.parse(snapshot.toString('utf8')); } catch { throw new Error('Invalid snapshot JSON'); }
+  const pages = release && typeof release === 'object' && 'pages' in release ? (release as { pages: unknown }).pages : undefined;
+  if (pages !== undefined && (!Array.isArray(pages) || pages.some(page => {
+    const preset = page && typeof page === 'object' && 'content' in page ? (page as { content?: { preset?: unknown } }).content?.preset : undefined;
+    return preset !== undefined && (!preset || typeof preset !== 'object' ||
+      (preset as Record<string, unknown>).id !== metadata.templateId ||
+      (preset as Record<string, unknown>).version !== metadata.templateVersion);
+  }))) throw new Error('Release preset identity mismatch');
   if (!digestPattern.test(input.checksum ?? '') || `sha256:${createHash('sha256').update(snapshot).digest('hex')}` !== input.checksum) throw new Error('Snapshot checksum mismatch');
   return { ...input as ReleaseInput, imageDigest: metadata.imageDigest };
 }

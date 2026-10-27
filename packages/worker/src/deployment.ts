@@ -5,6 +5,8 @@ import type { FailureInput, FinalizeInput } from './operations.js';
 interface ImageIdentity {
   repository: string;
   digest: string;
+  sourceCommit?: string;
+  manifestChecksum?: string;
 }
 
 export interface DeploymentState {
@@ -41,23 +43,42 @@ export async function deployCandidate<Route>(
   let routeAttempted = false;
   const switchToken = `${claim.id}:${claim.attempts}:${randomUUID()}`;
   let failureCode = 'WORKER_INTERNAL_ERROR';
+  const ownsAttempt = (state: DeploymentState | null): state is DeploymentState => !!state &&
+    state.status === 'pending' && state.desiredRevision === claim.desiredRevision &&
+    state.leaseOwner === claim.leaseOwner && state.attempts === claim.attempts &&
+    state.leaseUntil?.getTime() === claim.leaseUntil.getTime() &&
+    state.active?.routeRevision !== claim.desiredRevision;
+  const requireLeaseBudget = () => {
+    if (Date.now() >= claim.leaseUntil.getTime() - 5000) throw new Error('Deployment lease has insufficient activation time');
+  };
   try {
+    requireLeaseBudget();
     const host = await dependencies.getRepresentativeHost(claim.siteId);
     if (!host) throw new Error('Representative Host unavailable');
+    requireLeaseBudget();
     failureCode = 'CANDIDATE_START_FAILED';
     containerId = await dependencies.startCandidate({ siteId: claim.siteId, releaseId: claim.releaseId, image });
     failureCode = 'CANDIDATE_UNHEALTHY';
     if (!await dependencies.waitHealthy(containerId)) throw new Error('Candidate is not healthy');
     if (!await dependencies.checkRepresentativeHost(containerId, host)) throw new Error('Representative Host check failed');
     previous = await dependencies.readRoute(claim.siteId);
+    requireLeaseBudget();
+    if (!ownsAttempt(await dependencies.readDeploymentState(claim.id))) throw new Error('Deployment lease was superseded');
+    requireLeaseBudget();
     failureCode = 'ROUTE_SWITCH_FAILED';
     routeAttempted = true;
     await dependencies.applyRoute(claim.siteId, claim.desiredRevision, containerId, host, switchToken);
     if (!await dependencies.verifyRoute(claim.siteId, claim.desiredRevision, host)) throw new Error('Route verification failed');
     failureCode = 'WORKER_INTERNAL_ERROR';
+    const pinIdentity = image.repository === 'local' ? {} : {
+      imageRepository: image.repository,
+      ...(image.sourceCommit ? { sourceCommit: image.sourceCommit } : {}),
+      ...(image.manifestChecksum ? { manifestChecksum: image.manifestChecksum } : {}),
+    };
     const finalized = await dependencies.finalizeAfterRouteVerification({
       operationId: claim.id, workerId: claim.leaseOwner, attempts: claim.attempts,
       leaseUntil: claim.leaseUntil, imageDigest: image.digest,
+      ...pinIdentity,
     });
     if (!finalized) throw new Error('Deployment finalize rejected');
     return true;
@@ -69,11 +90,9 @@ export async function deployCandidate<Route>(
       } catch (stateError) {
         throw new AggregateError([error, stateError], 'Deployment outcome unknown; coordination required');
       }
-      if (!state || state.status !== 'pending' || state.desiredRevision !== claim.desiredRevision
-        || state.leaseOwner !== claim.leaseOwner || state.attempts !== claim.attempts
-        || state.leaseUntil?.getTime() !== claim.leaseUntil.getTime()
-        || state.leaseUntil.getTime() <= Date.now()
-        || state.active?.routeRevision === claim.desiredRevision) {
+      // Expiry alone does not transfer ownership. The switch token still fences
+      // restoration; never restore over a committed or reclaimed attempt.
+      if (!ownsAttempt(state)) {
         throw new Error('Deployment outcome unknown; coordination required', { cause: error });
       }
       let restored: boolean;

@@ -47,6 +47,15 @@ export async function receiveRelease(request: Request, routeSiteId: string): Pro
       return Response.json({ error: 'site_not_found' }, { status: 404 });
     }
 
+    const publicPin = await client.query(`SELECT "imageRepository", "manifestChecksum", "sourceCommit", "imageDigest", "version"
+      FROM "TemplatePin" WHERE "siteId" = $1 AND "templateId" = $2 FOR UPDATE`, [input.siteId, input.metadata.templateId]);
+    if (publicPin.rowCount && publicPin.rows[0].imageRepository !== null &&
+        (publicPin.rows[0].imageDigest !== input.metadata.imageDigest || publicPin.rows[0].version !== input.metadata.templateVersion ||
+         publicPin.rows[0].manifestChecksum !== input.metadata.manifestChecksum)) {
+      await client.query('ROLLBACK');
+      return Response.json({ error: 'template_pin_mismatch' }, { status: 409 });
+    }
+
     const metadata = {
       ...input.metadata,
       checksum: createHash('sha256').update(JSON.stringify(input.metadata)).digest('hex'),

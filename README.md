@@ -6,7 +6,7 @@
 
 - Next.js 控制 API：验证 CMS 服务身份、站点归属，接收 Release 和发布请求；不访问 Docker Socket。
 - PostgreSQL：保存 workspace、站点、模板版本、Release 元数据、发布操作与活动部署状态。Release 快照存放在持久卷。
-- 独立部署 worker：唯一允许通过受限 Docker 控制通道管理站点容器的服务；以批准的镜像 digest 部署候选实例，通过健康检查后切流，失败时保留旧版本。
+- 独立部署 worker：唯一允许通过受限 Docker 控制通道管理站点容器的服务；公开模板按固定 GHCR 仓库和不可变 digest 拉取，旧本地镜像仍由 `GATEWAY_APPROVED_IMAGE_DIGEST` 批准；候选实例通过健康检查后才切流，失败时保留旧版本。
 - Traefik：唯一公网入口，按已验证的域名路由并终止 HTTPS；ACME HTTP-01 负责证书签发与续期。
 
 站点必须使用不可变的模板版本、manifest checksum、镜像 digest 和内容 Release。模板升级需要显式批准。HTTP-01 要求域名解析到网关且公网 80/443 可达，不支持通配符证书。

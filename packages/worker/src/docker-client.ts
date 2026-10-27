@@ -85,6 +85,69 @@ export function createDockerEngineClient({
   const allowed = new Set(approvedImages);
   const candidates = new Set<string>();
   return {
+    async pull(image: string): Promise<void> {
+      if (!allowed.has(image) || !image.includes('@')) throw new Error('Unapproved image pull');
+      const deadline = Date.now() + timeoutMs;
+      const path = `/images/create?fromImage=${encodeURIComponent(image)}`;
+      const send = (method: string, requestPath: string, consume: (response: import('node:http').IncomingMessage) => Promise<void>) =>
+        new Promise<void>((resolve, reject) => {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) { reject(new Error('Docker image request timed out')); return; }
+          let incoming: import('node:http').IncomingMessage | undefined;
+          const timer = setTimeout(() => {
+            reject(new Error('Docker image request timed out'));
+            incoming?.destroy();
+            request.destroy();
+          }, remaining);
+          const request = httpRequest({ socketPath, path: requestPath, method }, response => {
+            incoming = response;
+            consume(response).then(() => { clearTimeout(timer); resolve(); }, error => {
+              clearTimeout(timer); response.destroy(); reject(error);
+            });
+          });
+          request.on('error', () => { clearTimeout(timer); reject(new Error('Docker image request unavailable')); });
+          request.end();
+        });
+      await send('POST', path, async response => {
+        if (response.statusCode !== 200) throw new Error(`Docker image pull failed (${response.statusCode ?? 0})`);
+        let bytes = 0;
+        let pending = '';
+        const checkLine = (line: string) => {
+          if (!line.trim()) return;
+          try {
+            const data = JSON.parse(line);
+            if (data.error || data.errorDetail) throw new Error('Docker image pull failed');
+          } catch (error) {
+            if (error instanceof SyntaxError) throw new Error('Invalid Docker image pull response');
+            throw error;
+          }
+        };
+        for await (const chunk of response) {
+          if (Date.now() >= deadline) throw new Error('Docker image pull timed out');
+          bytes += chunk.length;
+          if (bytes > maxResponseBytes * 4) throw new Error('Docker pull response too large');
+          pending += chunk.toString('utf8');
+          let newline;
+          while ((newline = pending.indexOf('\n')) >= 0) { checkLine(pending.slice(0, newline)); pending = pending.slice(newline + 1); }
+        }
+        checkLine(pending);
+      });
+      await send('GET', `/images/${encodeURIComponent(image)}/json`, async response => {
+        if (response.statusCode !== 200) throw new Error(`Docker image inspect failed (${response.statusCode ?? 0})`);
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        for await (const chunk of response) {
+          if (Date.now() >= deadline) throw new Error('Docker image inspect timed out');
+          bytes += chunk.length;
+          if (bytes > maxResponseBytes) throw new Error('Docker image inspect response too large');
+          chunks.push(Buffer.from(chunk));
+        }
+        let inspection: unknown;
+        try { inspection = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('Invalid Docker image inspection'); }
+        const repoDigests = inspection && typeof inspection === 'object' ? (inspection as { RepoDigests?: unknown }).RepoDigests : undefined;
+        if (!Array.isArray(repoDigests) || !repoDigests.includes(image)) throw new Error('Docker pulled image digest mismatch');
+      });
+    },
     request(input: DockerRequest): Promise<{ Id: string }> {
       const method = input.method;
       const path = input.path;

@@ -42,6 +42,9 @@ model TemplatePin {
   templateId  String
   version     String
   imageDigest String
+  imageRepository String?
+  manifestChecksum String?
+  sourceCommit String?
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @db.Timestamptz(6)
 

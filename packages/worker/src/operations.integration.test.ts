@@ -188,3 +188,39 @@ test('candidate failure leaves the prior active tuple untouched and cannot final
   const status = await pool!.query('SELECT "status", "failureCode" FROM "PublishOperation" WHERE "id" = $1', [claim.id]);
   assert.deepEqual(status.rows[0], { status: 'failed', failureCode: 'CANDIDATE_UNHEALTHY' });
 });
+
+test('public finalization rejects every changed or NULL pin field and preserves the active release', { skip: !pool }, async () => {
+  const publicSite = randomUUID();
+  const publicOperation = randomUUID();
+  const repository = 'ghcr.io/tangtianshuo/independent-website-templates/aeroframe';
+  const manifestChecksum = `sha256:${'c'.repeat(64)}`;
+  const sourceCommit = 'd'.repeat(40);
+  const oldCredential = 'old-credential-hash';
+  await pool!.query('INSERT INTO "Site" ("id","workspaceId","desiredRevision","desiredReleaseId","credentialHash","updatedAt") VALUES ($1,$2,1,$3,$4,now())', [publicSite, workspaceId, 'public-release', oldCredential]);
+  await pool!.query('INSERT INTO "TemplatePin" ("id","siteId","templateId","version","imageDigest","imageRepository","manifestChecksum","sourceCommit","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())', [randomUUID(), publicSite, 'aeroframe', '1.0.1', digest, repository, manifestChecksum, sourceCommit]);
+  await pool!.query('INSERT INTO "Release" ("id","siteId","releaseId","checksum","metadata","snapshotRef") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [randomUUID(), publicSite, 'public-release', 'sha256:test', JSON.stringify({ templateId: 'aeroframe', templateVersion: '1.0.1', imageDigest: digest, manifestChecksum }), '/test/public-snapshot']);
+  await pool!.query('INSERT INTO "ActiveDeployment" ("id","siteId","releaseId","imageDigest","routeRevision") VALUES ($1,$2,$3,$4,0)', [randomUUID(), publicSite, 'old-public-release', otherDigest]);
+  await pool!.query('INSERT INTO "PublishOperation" ("id","workspaceId","siteId","idempotencyKey","releaseId","expectedRevision","desiredRevision","leaseOwner","leaseUntil","attempts","candidateCredentialHash","updatedAt") VALUES ($1,$2,$3,$4,$5,0,1,$6,now()+interval \'1 minute\',1,$7,now())', [publicOperation, workspaceId, publicSite, randomUUID(), 'public-release', 'public-worker', 'e'.repeat(64)]);
+  const saved = await pool!.query('SELECT "leaseUntil" FROM "PublishOperation" WHERE "id"=$1', [publicOperation]);
+  const input = { operationId: publicOperation, workerId: 'public-worker', attempts: 1, leaseUntil: saved.rows[0].leaseUntil, imageDigest: digest, imageRepository: repository, sourceCommit, manifestChecksum };
+  try {
+    const variants = [
+      [null, null, null], [null, manifestChecksum, sourceCommit], [repository, null, sourceCommit], [repository, manifestChecksum, null],
+      [repository + '-other', manifestChecksum, sourceCommit], [repository, `sha256:${'f'.repeat(64)}`, sourceCommit], [repository, manifestChecksum, 'f'.repeat(40)],
+    ];
+    for (const [repo, checksum, commit] of variants) {
+      await pool!.query('UPDATE "TemplatePin" SET "imageRepository"=$1,"manifestChecksum"=$2,"sourceCommit"=$3 WHERE "siteId"=$4', [repo, checksum, commit, publicSite]);
+      assert.equal(await finalizeAfterRouteVerification(pool!, input), false, `public mismatch accepted: ${JSON.stringify([repo, checksum, commit])}`);
+      const state = await pool!.query('SELECT "releaseId","routeRevision" FROM "ActiveDeployment" WHERE "siteId"=$1', [publicSite]);
+      assert.deepEqual(state.rows[0], { releaseId: 'old-public-release', routeRevision: 0 });
+      assert.equal((await pool!.query('SELECT "credentialHash" FROM "Site" WHERE "id"=$1', [publicSite])).rows[0].credentialHash, oldCredential);
+    }
+    await pool!.query('UPDATE "TemplatePin" SET "imageRepository"=$1,"manifestChecksum"=$2,"sourceCommit"=$3 WHERE "siteId"=$4', [repository, manifestChecksum, sourceCommit, publicSite]);
+    assert.equal(await finalizeAfterRouteVerification(pool!, input), true);
+    assert.equal((await pool!.query('SELECT "status" FROM "PublishOperation" WHERE "id"=$1', [publicOperation])).rows[0].status, 'ready');
+    assert.equal((await pool!.query('SELECT "releaseId" FROM "ActiveDeployment" WHERE "siteId"=$1', [publicSite])).rows[0].releaseId, 'public-release');
+  } finally {
+    for (const table of ['ActiveDeployment', 'PublishOperation', 'Release', 'TemplatePin']) await pool!.query(`DELETE FROM "${table}" WHERE "siteId"=$1`, [publicSite]);
+    await pool!.query('DELETE FROM "Site" WHERE "id"=$1', [publicSite]);
+  }
+});

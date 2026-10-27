@@ -38,7 +38,7 @@ function setup() {
       route = previous; routeToken = null; return true;
     },
     finalizeAfterRouteVerification: async (input: unknown) => {
-      assert.deepEqual(input, { operationId: claim.id, workerId: claim.leaseOwner, attempts: claim.attempts, leaseUntil: claim.leaseUntil, imageDigest: image.digest });
+      assert.deepEqual(input, { operationId: claim.id, workerId: claim.leaseOwner, attempts: claim.attempts, leaseUntil: claim.leaseUntil, imageDigest: image.digest, imageRepository: image.repository });
       calls.push('finalize'); return true;
     },
     failPublishOperation: async (input: { failureCode: string }) => { calls.push(`fail:${input.failureCode}`); return true; },
@@ -49,7 +49,7 @@ function setup() {
 test('verifies candidate health and representative Host before switching, then verifies route before finalizing', async () => {
   const { calls, dependencies } = setup();
   assert.equal(await deployCandidate(claim, image, dependencies), true);
-  assert.deepEqual(calls, ['host:site-1', 'start', 'healthy', 'candidate-host', 'read:site-1', 'apply', 'verify', 'finalize']);
+  assert.deepEqual(calls, ['host:site-1', 'start', 'healthy', 'candidate-host', 'read:site-1', 'state', 'apply', 'verify', 'finalize']);
 });
 
 test('unhealthy candidate leaves old route and active tuple untouched', async () => {
@@ -71,7 +71,7 @@ test('route verification failure restores old route before marking failure', asy
   dependencies.verifyRoute = async () => { calls.push('verify'); return false; };
   await assert.rejects(deployCandidate(claim, image, dependencies), /route/i);
   assert.equal(currentRoute(), 'previous-route');
-  assert.deepEqual(calls, ['host:site-1', 'start', 'healthy', 'candidate-host', 'read:site-1', 'apply', 'verify', 'state', 'restore', 'remove', 'fail:ROUTE_SWITCH_FAILED']);
+  assert.deepEqual(calls, ['host:site-1', 'start', 'healthy', 'candidate-host', 'read:site-1', 'state', 'apply', 'verify', 'state', 'restore', 'remove', 'fail:ROUTE_SWITCH_FAILED']);
 });
 
 test('an apply error may have changed the route, so restores the prior route', async () => {
@@ -79,23 +79,26 @@ test('an apply error may have changed the route, so restores the prior route', a
   const apply = dependencies.applyRoute;
   dependencies.applyRoute = async (...args) => { await apply(...args); throw new Error('apply failed'); };
   await assert.rejects(deployCandidate(claim, image, dependencies), /apply failed/);
-  assert.deepEqual(calls, ['host:site-1', 'start', 'healthy', 'candidate-host', 'read:site-1', 'apply', 'state', 'restore', 'remove', 'fail:ROUTE_SWITCH_FAILED']);
+  assert.deepEqual(calls, ['host:site-1', 'start', 'healthy', 'candidate-host', 'read:site-1', 'state', 'apply', 'state', 'restore', 'remove', 'fail:ROUTE_SWITCH_FAILED']);
 });
 
 test('finalize rejection restores the old route without returning ready', async () => {
   const { calls, dependencies } = setup();
   dependencies.finalizeAfterRouteVerification = async () => { calls.push('finalize'); return false; };
   await assert.rejects(deployCandidate(claim, image, dependencies), /finalize/i);
-  assert.deepEqual(calls, ['host:site-1', 'start', 'healthy', 'candidate-host', 'read:site-1', 'apply', 'verify', 'finalize', 'state', 'restore', 'remove', 'fail:WORKER_INTERNAL_ERROR']);
+  assert.deepEqual(calls, ['host:site-1', 'start', 'healthy', 'candidate-host', 'read:site-1', 'state', 'apply', 'verify', 'finalize', 'state', 'restore', 'remove', 'fail:WORKER_INTERNAL_ERROR']);
 });
 
 test('finalize throws after commit: keeps route and never records failure', async () => {
   const { calls, dependencies, currentRoute } = setup();
-  dependencies.finalizeAfterRouteVerification = async () => { calls.push('finalize'); throw new Error('commit acknowledgment lost'); };
-  dependencies.readDeploymentState = async () => { calls.push('state'); return {
-    ...pending, status: 'ready', leaseOwner: null, leaseUntil: null,
-    active: { releaseId: claim.releaseId, imageDigest: image.digest, routeRevision: claim.desiredRevision },
-  }; };
+  dependencies.finalizeAfterRouteVerification = async () => {
+    calls.push('finalize');
+    dependencies.readDeploymentState = async () => { calls.push('state'); return {
+      ...pending, status: 'ready', leaseOwner: null, leaseUntil: null,
+      active: { releaseId: claim.releaseId, imageDigest: image.digest, routeRevision: claim.desiredRevision },
+    }; };
+    throw new Error('commit acknowledgment lost');
+  };
   await assert.rejects(deployCandidate(claim, image, dependencies), /coordination required/i);
   assert.equal(currentRoute(), 'candidate-2');
   assert.deepEqual(calls.slice(-2), ['finalize', 'state']);
@@ -103,8 +106,11 @@ test('finalize throws after commit: keeps route and never records failure', asyn
 
 test('unknown commit result keeps new route and does not write failed', async () => {
   const { calls, dependencies, currentRoute } = setup();
-  dependencies.finalizeAfterRouteVerification = async () => { calls.push('finalize'); throw new Error('connection lost'); };
-  dependencies.readDeploymentState = async () => { calls.push('state'); throw new Error('database unavailable'); };
+  dependencies.finalizeAfterRouteVerification = async () => {
+    calls.push('finalize');
+    dependencies.readDeploymentState = async () => { calls.push('state'); throw new Error('database unavailable'); };
+    throw new Error('connection lost');
+  };
   await assert.rejects(deployCandidate(claim, image, dependencies), /coordination required/i);
   assert.equal(currentRoute(), 'candidate-2');
   assert.deepEqual(calls.slice(-2), ['finalize', 'state']);
@@ -112,8 +118,11 @@ test('unknown commit result keeps new route and does not write failed', async ()
 
 test('lost lease does not restore or record failure', async () => {
   const { calls, dependencies, currentRoute } = setup();
-  dependencies.verifyRoute = async () => { calls.push('verify'); return false; };
-  dependencies.readDeploymentState = async () => { calls.push('state'); return { ...pending, attempts: 4 }; };
+  dependencies.verifyRoute = async () => {
+    calls.push('verify');
+    dependencies.readDeploymentState = async () => { calls.push('state'); return { ...pending, attempts: 4 }; };
+    return false;
+  };
   await assert.rejects(deployCandidate(claim, image, dependencies), /coordination required/i);
   assert.equal(currentRoute(), 'candidate-2');
   assert.deepEqual(calls.slice(-2), ['verify', 'state']);
@@ -141,4 +150,32 @@ test('restoration error is unknown and never records failure', async () => {
     return true;
   });
   assert.deepEqual(calls.slice(-3), ['verify', 'state', 'restore']);
+});
+
+test('lease crossing during representative Host validation never switches the old route', async () => {
+  const { calls, dependencies, currentRoute } = setup();
+  const originalNow = Date.now;
+  let now = claim.leaseUntil.getTime() - 10_000;
+  Date.now = () => now;
+  dependencies.checkRepresentativeHost = async () => { now = claim.leaseUntil.getTime() + 1; return true; };
+  try {
+    await assert.rejects(deployCandidate(claim, image, dependencies), /lease/i);
+    assert.equal(currentRoute(), 'previous-route');
+    assert.equal(calls.includes('apply'), false);
+    assert.equal(calls.includes('remove'), true);
+  } finally { Date.now = originalNow; }
+});
+
+test('expired attempt restores its own switch token when the database still has the old active route', async () => {
+  const { calls, dependencies, currentRoute } = setup();
+  const originalNow = Date.now;
+  let now = claim.leaseUntil.getTime() - 10_000;
+  Date.now = () => now;
+  dependencies.verifyRoute = async () => { now = claim.leaseUntil.getTime() + 1; return false; };
+  try {
+    await assert.rejects(deployCandidate(claim, image, dependencies), /route|recorded/i);
+    assert.equal(currentRoute(), 'previous-route');
+    assert.equal(calls.includes('restore'), true);
+    assert.equal(calls.includes('remove'), true);
+  } finally { Date.now = originalNow; }
 });
