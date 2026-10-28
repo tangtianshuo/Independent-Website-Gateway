@@ -194,3 +194,22 @@ test('restart does not restore an active container whose homepage is unavailable
     assert.equal((await restore())?.token, 'token');
   } finally { target.closeAllConnections(); await new Promise<void>(resolve => target.close(() => resolve())); await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test('retirement protection retains the previous route after restart and replaces it on the next switch', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gateway-protection-'));
+  const state = join(dir, 'routes.json');
+  const target = await upstream('active');
+  try {
+    const writer = createLocalRouter(state);
+    await writer.applyRoute(siteId, 1, target.port, 'site.example.test', 'one', 'first', 'release-1');
+    await writer.applyRoute(siteId, 2, target.port, 'site.example.test', 'two', 'second', 'release-2');
+    const recovered = createLocalRouter(state);
+    await recovered.recover(async () => [{ siteId, releaseId: 'release-2', routeRevision: 2 }], async () => true);
+    assert.deepEqual(recovered.protectedRoutes().map(route => route.containerId), ['second', 'first']);
+    recovered.protectedRoutes()[0].containerId = 'tampered';
+    assert.equal((await recovered.readRoute(siteId))?.containerId, 'second');
+    await recovered.applyRoute(siteId, 3, target.port, 'site.example.test', 'three', 'third', 'release-3');
+    assert.deepEqual(recovered.protectedRoutes().map(route => route.containerId), ['third', 'second']);
+  } finally { await target.close(); await rm(dir, { recursive: true, force: true }); }
+});

@@ -2,10 +2,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import { Pool } from 'pg';
+import { pathToFileURL } from 'node:url';
 import { claimPublishOperation } from './claim.js';
 import { deployCandidate } from './deployment.js';
 import { createDockerEngineClient } from './docker-client.js';
 import { createDockerCandidateAdapter } from './docker.js';
+import { collectRetiredContainers, createRetirementClient } from './retirement.js';
 import { pullApprovedImage } from './pull.js';
 import { failPublishOperation, finalizeAfterRouteVerification, persistCandidateCredential } from './operations.js';
 import { checkCandidate, createLocalRouter, type Route } from './runtime.js';
@@ -53,7 +55,8 @@ export async function runWorker() {
   const digest = process.env.GATEWAY_APPROVED_IMAGE_DIGEST ?? '';
   const gatewayUrl = process.env.GATEWAY_CONTROL_URL;
   const proxyPort = Number(process.env.GATEWAY_PROXY_PORT ?? 8080);
-  if (!databaseUrl || (digest !== '' && !digestPattern.test(digest)) ||
+  const platform = process.env.GATEWAY_DOCKER_PLATFORM || undefined;
+  if ((platform !== undefined && !['linux/amd64', 'linux/arm64'].includes(platform)) || !databaseUrl || (digest !== '' && !digestPattern.test(digest)) ||
       !gatewayUrl || !/^http:\/\/host\.docker\.internal:[1-9][0-9]{0,4}$/.test(gatewayUrl) ||
       !Number.isSafeInteger(proxyPort) || proxyPort < 1024 || proxyPort > 65535) throw new Error('Invalid worker configuration');
   const pool = new Pool({ connectionString: databaseUrl });
@@ -68,12 +71,21 @@ export async function runWorker() {
     return active.rows;
   }, route => inspectRoute(socketPath, route));
   await router.listen(proxyPort);
+  const retirement = createRetirementClient(socketPath);
+  let nextCollection = 0;
   let stopping = false;
   const stop = () => { stopping = true; };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
   try {
     while (!stopping) {
       try {
+        if (Date.now() >= nextCollection) {
+          nextCollection = Date.now() + 5000;
+          try {
+            const collected = await collectRetiredContainers(pool, router.protectedRoutes(), retirement);
+            if (collected.removed || collected.failed) console.info('Container retirement:', JSON.stringify(collected));
+          } catch { console.error('Container retirement unavailable; will retry'); }
+        }
         const claim = await claimPublishOperation(pool, workerId, 180);
         if (claim) {
           const selected = await pool.query<{ imageDigest: string; imageRepository: string | null; manifestChecksum: string | null; sourceCommit: string | null }>(`
@@ -101,13 +113,13 @@ export async function runWorker() {
               await failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' });
               continue;
             }
-            const pullDocker = createDockerEngineClient({ socketPath, timeoutMs: pullBudgetMs, approvedImages });
+            const pullDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: pullBudgetMs, approvedImages });
             if (!await pullApprovedImage(
               () => pullDocker.pull(`${image.repository}@${image.digest}`),
               () => failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' }),
             )) continue;
           }
-          const claimDocker = createDockerEngineClient({ socketPath, timeoutMs: Math.min(15_000, Math.max(1, claim.leaseUntil.getTime() - Date.now() - 10_000)), approvedImages });
+          const claimDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: Math.min(15_000, Math.max(1, claim.leaseUntil.getTime() - Date.now() - 10_000)), approvedImages });
           const adapter = createDockerCandidateAdapter(claimDocker, { network: 'gateway-sites', images: [image] });
           const credential = randomBytes(32).toString('hex');
           if (!await persistCandidateCredential(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, credential })) continue;
@@ -166,6 +178,6 @@ export async function runWorker() {
   } finally { await router.close(); await pool.end(); }
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file:///${process.argv[1].replace(/\\/g, '/')}`).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runWorker().catch(error => { console.error(error instanceof Error ? error.message : 'Worker failed'); process.exitCode = 1; });
 }

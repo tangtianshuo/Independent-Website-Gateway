@@ -203,3 +203,20 @@ test('rejects oversized responses without exposing response content', async () =
     await assert.rejects(client.request({ method: 'POST', path: createPath, body: createBody }), /Docker Engine response too large/);
   });
 });
+
+test('explicit architecture is applied to both pull and candidate creation', async () => {
+  const paths: string[] = [];
+  await withEngine((request, response) => {
+    paths.push(request.url!);
+    if (request.url?.startsWith('/images/create?')) response.end('{"status":"Downloaded"}\n');
+    else if (request.url?.includes('/containers/create?')) { response.writeHead(201); response.end('{"Id":"platform-candidate"}'); }
+    else response.end(JSON.stringify({ RepoDigests: [image] }));
+  }, async path => {
+    const client = clientFor(path, { platform: 'linux/amd64' });
+    await client.pull(image);
+    await client.request({ method: 'POST', path: createPath, body: createBody });
+  });
+  assert.equal(paths[0], `/images/create?fromImage=${encodeURIComponent(image)}&platform=linux%2Famd64`);
+  assert.equal(paths[2], `${createPath}&platform=linux%2Famd64`);
+  assert.throws(() => clientFor('/unused', { platform: 'linux/amd64&privileged=true' }), /Invalid Docker Engine configuration/);
+});

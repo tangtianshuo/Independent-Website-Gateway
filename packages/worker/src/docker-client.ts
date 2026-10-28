@@ -1,7 +1,7 @@
 import { request as httpRequest } from 'node:http';
 
 interface DockerRequest { method: 'POST' | 'DELETE'; path: string; body?: Record<string, unknown> }
-interface DockerEngineOptions { socketPath?: string; timeoutMs?: number; maxResponseBytes?: number; approvedImages?: readonly string[] }
+interface DockerEngineOptions { socketPath?: string; timeoutMs?: number; maxResponseBytes?: number; approvedImages?: readonly string[]; platform?: string }
 const imagePattern = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@)?sha256:[a-f0-9]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const releasePattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$/;
@@ -77,18 +77,20 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
 }
 
 export function createDockerEngineClient({
-  socketPath = '/var/run/docker.sock', timeoutMs = 10_000, maxResponseBytes = 1024 * 1024, approvedImages = [],
+  socketPath = '/var/run/docker.sock', timeoutMs = 10_000, maxResponseBytes = 1024 * 1024, approvedImages = [], platform,
 }: DockerEngineOptions = {}) {
   if (!socketPath || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
       !Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1 ||
+      (platform !== undefined && !['linux/amd64', 'linux/arm64'].includes(platform)) ||
       approvedImages.some(image => !imagePattern.test(image))) throw new Error('Invalid Docker Engine configuration');
+  const platformQuery = platform ? `&platform=${encodeURIComponent(platform)}` : '';
   const allowed = new Set(approvedImages);
   const candidates = new Set<string>();
   return {
     async pull(image: string): Promise<void> {
       if (!allowed.has(image) || !image.includes('@')) throw new Error('Unapproved image pull');
       const deadline = Date.now() + timeoutMs;
-      const path = `/images/create?fromImage=${encodeURIComponent(image)}`;
+      const path = `/images/create?fromImage=${encodeURIComponent(image)}${platformQuery}`;
       const send = (method: string, requestPath: string, consume: (response: import('node:http').IncomingMessage) => Promise<void>) =>
         new Promise<void>((resolve, reject) => {
           const remaining = deadline - Date.now();
@@ -166,7 +168,7 @@ export function createDockerEngineClient({
       }
       return new Promise((resolve, reject) => {
         const request = httpRequest({
-          socketPath, path, method,
+          socketPath, path: path.startsWith('/containers/create?') ? path + platformQuery : path, method,
           headers: payload === undefined ? undefined : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
         }, response => {
           const chunks: Buffer[] = [];

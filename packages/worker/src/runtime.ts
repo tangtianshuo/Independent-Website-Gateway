@@ -63,6 +63,7 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
     listen(port: number) { return new Promise<void>((resolve, reject) => server.once('error', reject).listen(port, '127.0.0.1', resolve)); },
     port() { const address = server.address(); return address && typeof address !== 'string' ? address.port : 0; },
     close() { server.closeAllConnections(); return new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); },
+    protectedRoutes(): Route[] { return [...routes.values(), ...previous.values()].map(route => ({ ...route })); },
     readRoute(siteId: string): Promise<Route | undefined> { return Promise.resolve(routes.get(siteId)); },
     async applyRoute(siteId: string, revision: number, port: number, host: string, token: string, containerId?: string, releaseId?: string) {
       const route = { siteId, revision, port, host, token, containerId, releaseId };
@@ -109,7 +110,11 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
         if (match && await valid(match) && await checkCandidate(match.port, match.host, '/')) recovered.set(match.siteId, match);
       }
       routes.clear(); previous.clear();
-      for (const [site, route] of recovered) routes.set(site, route);
+      for (const [site, route] of recovered) {
+        routes.set(site, route);
+        const prior = saved.previous.find(item => validRoute(item) && item.siteId === site && item.containerId !== route.containerId);
+        if (prior) previous.set(site, prior);
+      }
     },
   };
 }
