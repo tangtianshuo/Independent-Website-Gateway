@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { authenticateService } from './auth';
-import { loadPublicTemplate } from './public-registry';
+import { loadPublicTemplate, PublicRegistryError } from './public-registry';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -15,7 +15,12 @@ export async function updateTemplatePin(request: Request, siteId: string): Promi
   if (!body || typeof body !== 'object' || Array.isArray(body) || typeof (body as Record<string, unknown>).templateId !== 'string' || typeof (body as Record<string, unknown>).templateVersion !== 'string') return Response.json({ error: 'invalid_request' }, { status: 400 });
   let record;
   try { record = await loadPublicTemplate((body as { templateId: string }).templateId, (body as { templateVersion: string }).templateVersion); }
-  catch (error) { return Response.json({ error: error instanceof Error && error.message === 'Public template not found' ? 'template_not_found' : 'invalid_template' }, { status: 400 }); }
+  catch (error) {
+    const diagnostic = error instanceof PublicRegistryError ? error.diagnostic : { stage: 'unknown', reason: 'unexpected' };
+    console.warn(JSON.stringify({ event: 'template_verification_failed', siteId, ...diagnostic }));
+    if (error instanceof PublicRegistryError && error.unavailable) return Response.json({ error: 'template_registry_unavailable' }, { status: 503 });
+    return Response.json({ error: error instanceof PublicRegistryError && error.diagnostic.reason === 'template_not_found' ? 'template_not_found' : 'invalid_template' }, { status: 400 });
+  }
   let client;
   try {
     client = await pool.connect();

@@ -37,6 +37,21 @@ worker 直接入口使用标准文件 URL 比较，支持绝对路径启动。�
 
 2026-10-28 的 CMS 三件套本地验收脚本与报告在相邻 CMS 仓库 `ops/e2e/`、`docs/verification/2026-10-28-docker-e2e.md`，worker 仍按现有单机设计作为宿主进程运行。
 
+## 公开模板核验诊断
+
+`PUT /api/v1/sites/:siteId/template-pin` 核验失败时，control 向 stderr 写入一行 JSON，`event` 为 `template_verification_failed`。按 `siteId` 关联 CMS 的失败时间，查看 `stage`、`reason`、`elapsedMs`；失败发生在上游 HTTP 响应时还包含 `status`，数字限流头在有效时记录为 `rateLimitRemaining`、`rateLimitReset`（Unix 秒）、`retryAfterSeconds`。网络错误只记录允许列表内的 `networkCode`，不写入原始错误文本、请求 URL、响应正文或凭据。
+
+| stage | 核验边界 |
+| --- | --- |
+| `identity` | 模板 ID / 版本格式 |
+| `registry_commit` | GitHub registry 分支解析为固定 commit |
+| `registry_index` | 固定 commit 的 index 读取、格式校验和版本查找 |
+| `manifest` | 固定 source commit 的 manifest 读取、checksum 和兼容性校验 |
+
+`timeout`、`network`、`rate_limited`、`http_error` 返回 HTTP 503 / `template_registry_unavailable`；它们不能证明模板数据无效。JSON/大小/目录格式、checksum 和 manifest 兼容性错误仍返回 HTTP 400 / `invalid_template`；目录中没有该版本时返回 `template_not_found`。日志区分 `invalid_json`、`invalid_commit`、`invalid_index`、`checksum_mismatch`、`invalid_manifest` 等原因。未知内部异常只记录 `unknown` / `unexpected`。
+
+每个上游请求继续限制为 5 秒、最多 2 MiB，必须通过完整校验才可写 pin。当前 loader 不增加自动重试或缓存；CMS 原有的冻结意图恢复行为继续适用。间歇故障再次出现时，应依据实际失败阶段决定修复，不能把后续一次成功核验当作根因已修复。2026-10-29 的本地复验与边界记录位于相邻 CMS 仓库 `docs/verification/2026-10-29-template-registry-diagnostics.md`。
+
 
 ## 站点容器自动退役
 
