@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { test } from 'node:test';
 import { createDockerEngineClient } from './docker-client.js';
+import { createDockerCandidateAdapter } from './docker.js';
 
 const socketPath = () => process.platform === 'win32' ? `\\\\.\\pipe\\gateway-docker-test-${randomUUID()}` : `/tmp/gateway-docker-test-${randomUUID()}.sock`;
 async function withEngine(handler: (request: IncomingMessage, response: ServerResponse) => void, run: (path: string) => Promise<void>) {
@@ -17,7 +18,7 @@ const workspaceId = randomUUID();
 const image = `registry.example.com/templates/storefront@sha256:${'a'.repeat(64)}`;
 const createBody = {
   Image: image, User: '10001:10001',
-  Env: [`SITE_ID=${siteId}`, 'RELEASE_ID=release-1', `NUXT_WORKSPACE_ID=${workspaceId}`, `NUXT_SITE_ID=${siteId}`, 'NUXT_GATEWAY_URL=http://host.docker.internal:3000', `NUXT_SITE_CREDENTIAL=${'a'.repeat(64)}`],
+  Env: [`SITE_ID=${siteId}`, 'RELEASE_ID=release-1', `NUXT_WORKSPACE_ID=${workspaceId}`, `NUXT_SITE_ID=${siteId}`, 'NUXT_GATEWAY_URL=http://host.docker.internal:3000', `NUXT_SITE_CREDENTIAL=${'a'.repeat(64)}`, 'NUXT_PUBLIC_INGEST_ORIGIN='],
   Labels: { 'gateway.site-id': siteId, 'gateway.release-id': 'release-1' },
   HostConfig: {
     NetworkMode: 'gateway-sites', ReadonlyRootfs: true, Privileged: false,
@@ -219,4 +220,36 @@ test('explicit architecture is applied to both pull and candidate creation', asy
   assert.equal(paths[0], `/images/create?fromImage=${encodeURIComponent(image)}&platform=linux%2Famd64`);
   assert.equal(paths[2], `${createPath}&platform=linux%2Famd64`);
   assert.throws(() => clientFor('/unused', { platform: 'linux/amd64&privileged=true' }), /Invalid Docker Engine configuration/);
+});
+
+
+test('actual candidate adapter passes strict engine validation with trusted intake and optional artifact', async () => {
+  for (const ingestOrigin of ['', 'https://intake.example', 'http://127.0.0.1:18184']) for (const snapshotRef of [undefined, '/tmp/gateway-artifacts/published.snapshot']) {
+    let received: Record<string, unknown> | undefined;
+    await withEngine((request, response) => {
+      let bytes = ''; request.on('data', chunk => { bytes += chunk; });
+      request.on('end', () => { if (request.url?.includes('/create?')) { received = JSON.parse(bytes); response.writeHead(201).end('{"Id":"adapter-candidate"}'); } else response.writeHead(204).end(); });
+    }, async socket => {
+      const digest = `sha256:${'a'.repeat(64)}`;
+      const client = createDockerEngineClient({ socketPath: socket, approvedImages: [digest] });
+      const adapter = createDockerCandidateAdapter(client, { network: 'gateway-sites', images: [{ repository: 'local', digest }], ingestOrigin });
+      assert.equal(await adapter.startCandidate({ siteId, workspaceId, releaseId: 'release-1', image: { repository: 'local', digest }, credential: 'a'.repeat(64), gatewayUrl: 'http://host.docker.internal:18183', hostPort: 49152, snapshotRef }), 'adapter-candidate');
+    });
+    assert.deepEqual((received!.Env as string[]).slice(6), [`NUXT_PUBLIC_INGEST_ORIGIN=${ingestOrigin}`, ...(snapshotRef ? ['PUBLISHED_SNAPSHOT_PATH=/var/lib/gateway/artifacts/published.json'] : [])]);
+    assert.deepEqual((received!.HostConfig as Record<string, unknown>).Binds, snapshotRef ? [`${snapshotRef}:/var/lib/gateway/artifacts/published.json:ro`] : undefined);
+  }
+});
+
+test('strict engine rejects unknown duplicate and unsafe public intake environment entries before sending', async () => {
+  let requests = 0;
+  await withEngine((_request, response) => { requests++; response.end(); }, async socket => {
+    const client = clientFor(socket);
+    for (const origin of ['http://public.example', 'https://user:secret@intake.example', 'https://intake.example/path', 'https://intake.example\nNODE_OPTIONS=evil']) {
+      await assert.rejects(client.request({ method: 'POST', path: createPath, body: { ...createBody, Env: [...createBody.Env.slice(0, 6), `NUXT_PUBLIC_INGEST_ORIGIN=${origin}`] } }), /Invalid Docker request/);
+    }
+    for (const Env of [[...createBody.Env, 'NUXT_PUBLIC_INGEST_ORIGIN=https://attacker.example'], [...createBody.Env, 'NODE_OPTIONS=--inspect'], [...createBody.Env.slice(0,6), 'UNKNOWN='], createBody.Env.slice(0,6)]) {
+      await assert.rejects(client.request({ method: 'POST', path: createPath, body: { ...createBody, Env } }), /Invalid Docker request/);
+    }
+  });
+  assert.equal(requests, 0);
 });

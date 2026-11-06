@@ -39,11 +39,22 @@ function jsonObject(value: Record<string, unknown>): Record<string, unknown> {
 }
 function jsonArray<T>(value: T[]): T[] { return Object.setPrototypeOf(value, null) as T[]; }
 
+function validIngestEnvironment(value: unknown): boolean {
+  if (typeof value !== 'string' || !value.startsWith('NUXT_PUBLIC_INGEST_ORIGIN=')) return false;
+  const origin = value.slice('NUXT_PUBLIC_INGEST_ORIGIN='.length);
+  if (!origin) return true;
+  try {
+    const url = new URL(origin);
+    return url.origin === origin && !url.username && !url.password &&
+      (url.protocol === 'https:' || url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname));
+  } catch { return false; }
+}
+
 function validCreateBody(body: Record<string, unknown> | undefined, approvedImages: ReadonlySet<string>): Record<string, unknown> | undefined {
   const values = fields(body, ['Env', 'HostConfig', 'Image', 'Labels', 'User']);
   if (!values) return undefined;
   const { Image, User, Env, Labels, HostConfig } = values;
-  const env = arrayValues(Env, Array.isArray(Env) && Env.length === 7 ? 7 : 6);
+  const env = arrayValues(Env, Array.isArray(Env) && Env.length === 8 ? 8 : 7);
   if (typeof Image !== 'string' || !imagePattern.test(Image) || !approvedImages.has(Image) || User !== '10001:10001' || !env ||
       typeof env[0] !== 'string' || !env[0].startsWith('SITE_ID=') || !uuidPattern.test(env[0].slice(8)) ||
       typeof env[1] !== 'string' || !env[1].startsWith('RELEASE_ID=') || !releasePattern.test(env[1].slice(11)) ||
@@ -52,7 +63,8 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
       typeof env[4] !== 'string' || !/^NUXT_GATEWAY_URL=http:\/\/(?:host\.docker\.internal|gateway-control):[1-9][0-9]{0,4}$/.test(env[4]) ||
       Number(new URL(env[4].slice(17)).port) > 65535 ||
       typeof env[5] !== 'string' || !/^NUXT_SITE_CREDENTIAL=[a-f0-9]{64}$/.test(env[5]) ||
-      env.length === 7 && (env[6] !== 'PUBLISHED_SNAPSHOT_PATH=/var/lib/gateway/artifacts/published.json')) return undefined;
+      !validIngestEnvironment(env[6]) ||
+      env.length === 8 && (env[7] !== 'PUBLISHED_SNAPSHOT_PATH=/var/lib/gateway/artifacts/published.json')) return undefined;
   const labels = fields(Labels, ['gateway.release-id', 'gateway.site-id']);
   if (!labels || labels['gateway.site-id'] !== env[0].slice(8) || labels['gateway.release-id'] !== env[1].slice(11)) return undefined;
   const hasBinds = !!HostConfig && typeof HostConfig === 'object' && Object.hasOwn(HostConfig, 'Binds');
@@ -68,7 +80,7 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
   const port = ports && fields(ports[0], ['HostIp', 'HostPort']);
   if (!port || port.HostIp !== '127.0.0.1' || typeof port.HostPort !== 'string' ||
       !/^[1-9][0-9]{3,4}$/.test(port.HostPort) || Number(port.HostPort) < 1024 || Number(port.HostPort) > 65535) return undefined;
-  if (env.length === 7) {
+  if (env.length === 8) {
     const binds = arrayValues(host.Binds, 1);
     if (!binds || typeof binds[0] !== 'string' || !snapshotBindPattern.test(binds[0])) return undefined;
   } else if (hasBinds) return undefined;
@@ -80,7 +92,7 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
       CapDrop: jsonArray(['ALL']), SecurityOpt: jsonArray(['no-new-privileges:true']),
       Memory: 512 * 1024 * 1024, NanoCpus: 500_000_000, PidsLimit: 128,
       PortBindings: jsonObject({ '3000/tcp': jsonArray([jsonObject({ HostIp: '127.0.0.1', HostPort: port.HostPort })]) }),
-      ...(env.length === 7 ? { Binds: jsonArray([String((host.Binds as unknown[])[0])]) } : {}),
+      ...(env.length === 8 ? { Binds: jsonArray([String((host.Binds as unknown[])[0])]) } : {}),
     }),
   });
 }
