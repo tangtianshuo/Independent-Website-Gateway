@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { authenticateService } from './auth';
+import { authenticateSiteService, serviceScopeErrorResponse } from './service-scope';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -8,12 +8,9 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export async function createPublishOperation(request: Request, siteId: string): Promise<Response> {
   let principal;
   try {
-    principal = authenticateService(request.headers.get('authorization') ?? undefined, {
-      secret: process.env.CMS_SERVICE_SECRET ?? '',
-      workspaceId: process.env.CMS_WORKSPACE_ID ?? '',
-    });
-  } catch {
-    return Response.json({ error: 'unauthorized' }, { status: 401 });
+    principal = await authenticateSiteService(request, siteId, pool);
+  } catch (error) {
+    return serviceScopeErrorResponse(error);
   }
   if (!uuid.test(siteId) || !uuid.test(principal.workspaceId)) return Response.json({ error: 'invalid_request' }, { status: 400 });
   let input: unknown;

@@ -21,7 +21,7 @@ describe('site info', () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ revision: 7 });
-    expect(query).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenLastCalledWith('SELECT "desiredRevision" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2', [siteId, '123e4567-e89b-42d3-a456-426614174001']);
   });
 
   it('does not reveal a site outside the authenticated workspace', async () => {

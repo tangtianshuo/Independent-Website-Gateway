@@ -60,3 +60,13 @@ worker 启动后以及空闲轮询期间约每 5 秒扫描一次，只回收匹�
 当前路由和前一条恢复备用路由均保留，因此稳定状态通常为每站点最多 2 个受保护实例。有任何 pending 发布（包括过期租约），或数据库活动部署与本机路由不一致时，跳过该站点。回收持有与发布入口相同的 Site 行锁，防止检查与删除之间插入新发布；不会删除 Release、快照、镜像、网络或数据卷。回滚仍通过旧快照创建新候选实例。
 
 这项机制沿用单机权威路由模型。缺少可信归属记录、配置不符或活动路由无法恢复的实例会保留供诊断，不以强制 prune 绕过保护；它不提供多主机调度或高可用协调。
+
+## CMS 来源身份与幂等开站
+
+`POST /api/v1/site-provisioning` 使用后端 `CMS_SERVICE_SECRET` 的 Bearer 凭据以及受信任配置 `CMS_INSTANCE_ID`，接收 `{ cmsWorkspaceId, cmsSiteId, name, requestKey }`，返回 `{ cmsWorkspaceId, cmsSiteId, workspaceId, siteId, siteUrl, status: 'provisioned' }`。`PLATFORM_DOMAIN` 是首次开站使用的平台域，例如 `sites.localhost`；默认地址由 Gateway 生成，格式为 `https://s-<Gateway site UUID 去连字符>.<PLATFORM_DOMAIN>`。请求 body 中的 instance、Gateway workspace/site、域名与状态不能决定身份。
+
+CMS 必须持久保存首次开站的 `requestKey`。相同 instance/source tuple/原始 key 重试会返回相同身份；原有来源换 key、原有 key 换来源均返回 HTTP 409 / `binding_conflict`，不改变映射。开站通过同一 PostgreSQL 事务及来源工作区锁创建 workspace/site/domain/bindings；实例内 requestKey 和站点来源均有唯一约束，竞争失败的事务整体回滚。
+
+后续站点管理请求携带由 CMS 已验证 workspaceContext 派生的 `X-CMS-Workspace`、`X-CMS-Site`，Gateway 验证服务凭据、后端 instance、完整来源映射及目标 site 的实际工作区归属。只缺一个来源头、空值或不匹配均拒绝，不回退旧模式。只有两个来源头都不存在时才允许 `CMS_WORKSPACE_ID` 旧单工作区模式，仍验证 site 归属；动态来源模式不要求配置该旧变量。询盘读取/修改和统计读取使用相同边界。
+
+开站仅预留默认域名，ownership/DNS/certificate/status 初始均为 `pending`，不会创建活动部署。`SourceSiteBinding.defaultDomainId` 固定引用最初预留的 Domain，切换主域名或修改平台域配置不会改变幂等重试的 siteUrl。C4 域名探测负责就绪、证书及切流，必须保留此默认域名身份；外键禁止直接删除被来源绑定引用的默认 Domain，解除绑定或销毁站点需另行显式设计。

@@ -21,6 +21,7 @@ describe('domain state projection', () => {
     process.env.CMS_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001';
     const query = async (sql: string, values: unknown[]) => {
       expect(values).toEqual(['00000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000001']);
+      if (sql === 'SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2') return { rowCount: 1, rows: [{ id: values[0] }] };
       expect(sql).toContain('FROM "Site" site');
       expect(sql).toContain('LEFT JOIN "Publication" publication');
       expect(sql).toContain('LEFT JOIN "Deployment" deployment');

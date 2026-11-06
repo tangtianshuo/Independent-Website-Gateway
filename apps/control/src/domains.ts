@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { domainToASCII } from 'node:url';
 import { Pool } from 'pg';
-import { authenticateService } from './auth';
+import { authenticateSiteService, authenticateSiteServiceIdentity, serviceScopeErrorResponse } from './service-scope';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -21,17 +21,13 @@ export function normalizeHostname(hostname: string): string {
   return ascii;
 }
 
-export async function reserveDomain(request: Request, siteId: string): Promise<Response> {
-  let principal;
+export async function reserveDomain(request: Request, siteId: string, database: Pick<Pool, 'query'> = pool): Promise<Response> {
   try {
-    principal = authenticateService(request.headers.get('authorization') ?? undefined, {
-      secret: process.env.CMS_SERVICE_SECRET ?? '',
-      workspaceId: process.env.CMS_WORKSPACE_ID ?? '',
-    });
-  } catch {
-    return Response.json({ error: 'unauthorized' }, { status: 401 });
+    authenticateSiteServiceIdentity(request);
+  } catch (error) {
+    return serviceScopeErrorResponse(error);
   }
-  if (!uuid.test(siteId) || !uuid.test(principal.workspaceId)) return Response.json({ error: 'invalid_request' }, { status: 400 });
+  if (!uuid.test(siteId)) return Response.json({ error: 'invalid_request' }, { status: 400 });
   let hostname: string;
   try {
     const input: unknown = await request.json();
@@ -41,10 +37,13 @@ export async function reserveDomain(request: Request, siteId: string): Promise<R
     return Response.json({ error: 'invalid_hostname' }, { status: 400 });
   }
 
+  let principal;
+  try { principal = await authenticateSiteService(request, siteId, database); }
+  catch (error) { return serviceScopeErrorResponse(error); }
   try {
-    const site = await pool.query('SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2', [siteId, principal.workspaceId]);
+    const site = await database.query('SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2', [siteId, principal.workspaceId]);
     if (!site.rowCount) return Response.json({ error: 'site_not_found' }, { status: 404 });
-    const result = await pool.query('INSERT INTO "Domain" ("id", "siteId", "hostname", "updatedAt") VALUES ($1, $2, $3, now()) RETURNING "id", "siteId", "hostname", "status", "ownershipStatus", "dnsStatus", "certificateStatus", "enabled", "isPrimary"', [randomUUID(), siteId, hostname]);
+    const result = await database.query('INSERT INTO "Domain" ("id", "siteId", "hostname", "updatedAt") VALUES ($1, $2, $3, now()) RETURNING "id", "siteId", "hostname", "status", "ownershipStatus", "dnsStatus", "certificateStatus", "enabled", "isPrimary"', [randomUUID(), siteId, hostname]);
     return Response.json(result.rows[0], { status: 201 });
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && error.code === '23505') return Response.json({ error: 'domain_conflict' }, { status: 409 });
@@ -55,12 +54,9 @@ export async function reserveDomain(request: Request, siteId: string): Promise<R
 export async function readDomainState(request: Request, siteId: string, database: Pick<Pool, 'query'> = pool): Promise<Response> {
   let principal;
   try {
-    principal = authenticateService(request.headers.get('authorization') ?? undefined, {
-      secret: process.env.CMS_SERVICE_SECRET ?? '',
-      workspaceId: process.env.CMS_WORKSPACE_ID ?? '',
-    });
-  } catch {
-    return json({ error: 'unauthorized' }, 401);
+    principal = await authenticateSiteService(request, siteId, database);
+  } catch (error) {
+    return serviceScopeErrorResponse(error);
   }
   if (!uuid.test(siteId) || !uuid.test(principal.workspaceId)) return json({ error: 'invalid_request' }, 400);
 

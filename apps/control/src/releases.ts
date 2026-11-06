@@ -3,7 +3,7 @@ import { link, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Pool } from 'pg';
 import { canonicalJson, validateReleaseInput } from '@gateway/contracts';
-import { authenticateService } from './auth';
+import { authenticateSiteService, ServiceScopeError, serviceScopeErrorResponse } from './service-scope';
 import { artifactSnapshotPath, ensureArtifactReadable } from '../../../packages/worker/src/artifacts';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -16,10 +16,7 @@ export async function receiveRelease(request: Request, routeSiteId: string): Pro
   let ownsFinalPath = false;
   let committed = false;
   try {
-    const principal = authenticateService(request.headers.get('authorization') ?? undefined, {
-      secret: process.env.CMS_SERVICE_SECRET ?? '',
-      workspaceId: process.env.CMS_WORKSPACE_ID ?? '',
-    });
+    const principal = await authenticateSiteService(request, routeSiteId, pool);
     const contentLengthHeader = request.headers.get('content-length');
     const contentLength = contentLengthHeader === null ? 0 : Number(contentLengthHeader);
     if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > maxRequestBytes) return Response.json({ error: 'request_too_large' }, { status: 413 });
@@ -106,7 +103,7 @@ export async function receiveRelease(request: Request, routeSiteId: string): Pro
     return Response.json({ siteId: input.siteId, releaseId: input.releaseId, checksum: input.checksum }, { status: 201 });
   } catch (error) {
     if (client) await client.query('ROLLBACK').catch(() => undefined);
-    if (error instanceof Error && error.message === 'Unauthorized') return Response.json({ error: 'unauthorized' }, { status: 401 });
+    if (error instanceof ServiceScopeError || error instanceof Error && error.message === 'Unauthorized') return serviceScopeErrorResponse(error);
     if (error instanceof SyntaxError || error instanceof Error && /Invalid|Template|checksum/.test(error.message)) return Response.json({ error: 'invalid_release' }, { status: 400 });
     if (ownsFinalPath && !committed) await rm(finalPath!, { force: true }).catch(() => undefined);
     return Response.json({ error: 'release_unavailable' }, { status: 503 });

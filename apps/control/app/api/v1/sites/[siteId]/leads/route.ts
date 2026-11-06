@@ -1,18 +1,10 @@
 import { Pool } from 'pg';
-import { timingSafeEqual } from 'node:crypto';
+import { authenticateSiteService, serviceScopeErrorResponse } from '../../../../../../src/service-scope';
 
 export const runtime = 'nodejs';
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function internalAuthorized(request: Request): boolean {
-  const expected = process.env.CMS_SERVICE_SECRET || '';
-  const value = request.headers.get('authorization') || '';
-  if (!expected || !value.startsWith('Bearer ')) return false;
-  const provided = Buffer.from(value.slice(7));
-  const secret = Buffer.from(expected);
-  return provided.length === secret.length && timingSafeEqual(provided, secret);
-}
 
 function internalResponse(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -23,7 +15,9 @@ export async function GET(
   { params }: { params: Promise<{ siteId: string }> },
 ): Promise<Response> {
   const { siteId } = await params;
-  if (!internalAuthorized(request)) return internalResponse({ error: 'unauthorized' }, 401);
+  let principal;
+  try { principal = await authenticateSiteService(request, siteId, pool); }
+  catch (error) { return serviceScopeErrorResponse(error); }
   if (!uuid.test(siteId)) return internalResponse({ error: 'invalid_request' }, 400);
   const query = new URL(request.url).searchParams;
   const status = query.get('status');
@@ -32,8 +26,8 @@ export async function GET(
   const skip = Math.max(Number(query.get('skip') || 0), 0);
   if (status && !['new', 'contacted', 'qualified', 'closed', 'spam'].includes(status))
     return internalResponse({ error: 'invalid_request' }, 400);
-  const values: unknown[] = [siteId];
-  const where = ['lead."siteId" = $1'];
+  const values: unknown[] = [siteId, principal.workspaceId];
+  const where = ['lead."siteId" = $1', 'lead."workspaceId" = $2'];
   if (status) {
     values.push(status);
     where.push(`lead."status" = $${values.length}`);
@@ -57,7 +51,9 @@ export async function PATCH(
   { params }: { params: Promise<{ siteId: string }> },
 ): Promise<Response> {
   const { siteId } = await params;
-  if (!internalAuthorized(request)) return internalResponse({ error: 'unauthorized' }, 401);
+  let principal;
+  try { principal = await authenticateSiteService(request, siteId, pool); }
+  catch (error) { return serviceScopeErrorResponse(error); }
   if (!uuid.test(siteId)) return internalResponse({ error: 'invalid_request' }, 400);
   const id = new URL(request.url).searchParams.get('id');
   if (!id || !uuid.test(id)) return internalResponse({ error: 'invalid_request' }, 400);
@@ -87,9 +83,9 @@ export async function PATCH(
     fields.push(`"notes" = $${values.length}`);
   }
   if (!fields.length) return internalResponse({ error: 'invalid_request' }, 400);
-  values.push(id, siteId);
+  values.push(id, siteId, principal.workspaceId);
   const result = await pool.query(
-    `UPDATE "Lead" SET ${fields.join(', ')}, "updatedAt" = now() WHERE "id" = $${values.length - 1} AND "siteId" = $${values.length} RETURNING *`,
+    `UPDATE "Lead" SET ${fields.join(', ')}, "updatedAt" = now() WHERE "id" = $${values.length - 2} AND "siteId" = $${values.length - 1} AND "workspaceId" = $${values.length} RETURNING *`,
     values,
   );
   if (!result.rowCount) return internalResponse({ error: 'lead_not_found' }, 404);

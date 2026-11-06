@@ -38,6 +38,7 @@ describe('publication state', () => {
   function pool(owned = true) {
     return { query: vi.fn(async (sql: string, values: unknown[]) => {
       // The database is external; retain its ownership predicate in this boundary double.
+      if (sql === 'SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2') return owned && values[0] === siteId && values[1] === workspaceId ? { rowCount: 1, rows: [{ id: siteId }] } : { rowCount: 0, rows: [] };
       if (!/WHERE site\."id" = \$1 AND site\."workspaceId" = \$2/.test(sql)) throw new Error('Missing ownership scope');
       return owned && values[0] === siteId && values[1] === workspaceId ? { rowCount: 1, rows: [row] } : { rowCount: 0, rows: [] };
     }) } as never;

@@ -1,14 +1,14 @@
 import { Pool } from 'pg';
-import { authenticateService } from './auth';
+import { authenticateSiteService, serviceScopeErrorResponse } from './service-scope';
 import { loadPublicTemplate, PublicRegistryError } from './public-registry';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export async function updateTemplatePin(request: Request, siteId: string): Promise<Response> {
+export async function updateTemplatePin(request: Request, siteId: string, database: Pool = pool): Promise<Response> {
   let principal;
-  try { principal = authenticateService(request.headers.get('authorization') ?? undefined, { secret: process.env.CMS_SERVICE_SECRET ?? '', workspaceId: process.env.CMS_WORKSPACE_ID ?? '' }); }
-  catch { return Response.json({ error: 'unauthorized' }, { status: 401 }); }
+  try { principal = await authenticateSiteService(request, siteId, database); }
+  catch (error) { return serviceScopeErrorResponse(error); }
   if (!uuid.test(siteId) || !uuid.test(principal.workspaceId)) return Response.json({ error: 'invalid_request' }, { status: 400 });
   let body: unknown;
   try { body = await request.json(); } catch { return Response.json({ error: 'invalid_request' }, { status: 400 }); }
@@ -23,7 +23,7 @@ export async function updateTemplatePin(request: Request, siteId: string): Promi
   }
   let client;
   try {
-    client = await pool.connect();
+    client = await database.connect();
     await client.query('BEGIN');
     const site = await client.query('SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2 FOR UPDATE', [siteId, principal.workspaceId]);
     if (!site.rowCount) { await client.query('ROLLBACK'); return Response.json({ error: 'site_not_found' }, { status: 404 }); }

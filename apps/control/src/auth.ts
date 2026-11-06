@@ -10,13 +10,25 @@ export interface ServiceIdentityConfig {
 }
 
 export function authenticateService(authorization: string | undefined, identity: ServiceIdentityConfig): ServicePrincipal {
-  if (!identity.secret || !identity.workspaceId) throw new Error('Unauthorized');
+  if (!identity.workspaceId) throw new Error('Unauthorized');
+  authenticateBearer(authorization, identity.secret);
+  return { workspaceId: identity.workspaceId };
+}
+
+function authenticateBearer(authorization: string | undefined, secret: string): void {
+  if (!secret) throw new Error('Unauthorized');
   const match = /^Bearer (.+)$/.exec(authorization ?? '');
   const supplied = match?.[1] ?? '';
-  const expectedDigest = createHash('sha256').update(identity.secret).digest();
+  const expectedDigest = createHash('sha256').update(secret).digest();
   const suppliedDigest = createHash('sha256').update(supplied).digest();
   if (!match || !timingSafeEqual(suppliedDigest, expectedDigest)) throw new Error('Unauthorized');
-  return { workspaceId: identity.workspaceId };
+}
+
+export function authenticateCmsService(authorization: string | undefined): { instanceId: string } {
+  authenticateBearer(authorization, process.env.CMS_SERVICE_SECRET ?? '');
+  const instanceId = process.env.CMS_INSTANCE_ID ?? '';
+  if (!instanceId || instanceId.length > 256 || instanceId.trim() !== instanceId || /[,\s\u0000-\u001f\u007f]/u.test(instanceId)) throw new Error('Unauthorized');
+  return { instanceId };
 }
 
 export function authorizeWorkspace(principal: ServicePrincipal, requestedWorkspaceId: string): void {

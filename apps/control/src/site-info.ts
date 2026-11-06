@@ -1,17 +1,14 @@
 import type { Pool } from 'pg';
-import { authenticateService } from './auth';
+import { authenticateSiteService, serviceScopeErrorResponse } from './service-scope';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function readSiteInfo(request: Request, siteId: string, pool: Pool): Promise<Response> {
   let principal;
   try {
-    principal = authenticateService(request.headers.get('authorization') ?? undefined, {
-      secret: process.env.CMS_SERVICE_SECRET ?? '',
-      workspaceId: process.env.CMS_WORKSPACE_ID ?? '',
-    });
-  } catch {
-    return Response.json({ error: 'unauthorized' }, { status: 401 });
+    principal = await authenticateSiteService(request, siteId, pool);
+  } catch (error) {
+    return serviceScopeErrorResponse(error);
   }
   if (!uuid.test(siteId) || !uuid.test(principal.workspaceId)) return Response.json({ error: 'invalid_request' }, { status: 400 });
 
