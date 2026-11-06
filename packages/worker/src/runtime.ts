@@ -100,7 +100,7 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
       previous.delete(siteId);
       return true;
     },
-    async recover(activeDeployments: () => Promise<{ siteId: string; releaseId: string; routeRevision: number }[]>, valid: (route: Route) => Promise<boolean>) {
+    async recover(activeDeployments: () => Promise<{ siteId: string; releaseId: string; routeRevision: number; host?: string | null }[]>, valid: (route: Route) => Promise<boolean>) {
       if (!statePath) return;
       let saved: { routes: Route[]; previous: Route[] };
       try { saved = JSON.parse(await readFile(statePath, 'utf8')) as typeof saved; }
@@ -110,10 +110,30 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
       const all = [...saved.routes, ...saved.previous];
       const recovered = new Map<string, Route>();
       for (const deployment of active) {
-        const match = all.find(route => validRoute(route) && route.siteId === deployment.siteId &&
-          route.revision === deployment.routeRevision && route.releaseId === deployment.releaseId);
-        if (match && await valid(match) && await checkCandidate(match.port, match.host, '/')) recovered.set(match.siteId, match);
+        const matches = all.filter(route => validRoute(route) && route.siteId === deployment.siteId &&
+          route.revision === deployment.routeRevision && route.releaseId === deployment.releaseId &&
+          (!deployment.host || route.host === deployment.host));
+        for (const match of matches) {
+          if (await valid(match) && await checkCandidate(match.port, match.host, '/')) {
+            recovered.set(match.siteId, match);
+            break;
+          }
+        }
       }
+      // Public traffic reads this file independently of the worker's memory.
+      // Persist a validated fallback before exposing it as recovered. Keep
+      // unresolved entries intact so their pending intents can retry recovery.
+      const durable = new Map(saved.routes.filter(validRoute).map(route => [route.siteId, route]));
+      const prior = new Map(saved.previous.filter(validRoute).map(route => [route.siteId, route]));
+      let changed = false;
+      for (const [site, route] of recovered) {
+        if (durable.get(site) !== route) {
+          durable.set(site, route);
+          if (prior.get(site) === route) prior.delete(site);
+          changed = true;
+        }
+      }
+      if (changed) await persist(durable, prior);
       routes.clear(); previous.clear();
       for (const [site, route] of recovered) {
         routes.set(site, route);

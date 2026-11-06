@@ -244,3 +244,25 @@ test('worker verifies a persisted route without owning the public traffic listen
     assert.equal(await router.verifyRoute(siteId, 1, 'foreign.example.test'), false);
   } finally { target.closeAllConnections(); await new Promise<void>(resolve => target.close(() => resolve())); }
 });
+
+
+test('restart tries and durably restores the healthy previous host of the same release', async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'gateway-domain-recovery-')),state=join(dir,'routes.json');
+  const target=createServer((req,res)=>{res.writeHead(req.headers.host==='old.example.test'?200:503);res.end();});
+  await new Promise<void>(resolve=>target.listen(0,'127.0.0.1',resolve));
+  try {
+    const writer=createLocalRouter(state),port=(target.address() as {port:number}).port;
+    await writer.applyRoute(siteId,1,port,'old.example.test','old','container','release');
+    await writer.applyRoute(siteId,1,port,'new.example.test','pending','container','release');
+    const restarted=createLocalRouter(state);
+    await restarted.recover(async()=>[{siteId,releaseId:'release',routeRevision:1}],async()=>true);
+    assert.equal((await restarted.readRoute(siteId))?.host,'old.example.test');
+    assert.equal(JSON.parse(await readFile(state,'utf8')).routes[0].host,'old.example.test');
+    // Once the new host is committed, a healthy older host must not replace it.
+    await restarted.applyRoute(siteId,1,port,'new.example.test','committed-new','container','release');
+    const committed=createLocalRouter(state);
+    await committed.recover(async()=>[{siteId,releaseId:'release',routeRevision:1,host:'new.example.test'}],async()=>true);
+    assert.equal(await committed.readRoute(siteId),undefined);
+    assert.equal(JSON.parse(await readFile(state,'utf8')).routes[0].host,'new.example.test');
+  } finally {target.closeAllConnections();await new Promise<void>(resolve=>target.close(()=>resolve()));await rm(dir,{recursive:true,force:true});}
+});

@@ -69,9 +69,10 @@ export async function runWorker() {
   const workerId = randomUUID();
   await pool.query('SELECT 1');
   await router.recover(async () => {
-    const active = await pool.query<{ siteId: string; releaseId: string; routeRevision: number }>(
-      `SELECT deployment."siteId", deployment."releaseId", deployment."routeRevision" FROM "ActiveDeployment" deployment
-       JOIN "Site" site ON site."id" = deployment."siteId"`);
+    const active = await pool.query<{ siteId: string; releaseId: string; routeRevision: number; host: string | null }>(
+      `SELECT active."siteId", active."releaseId", active."routeRevision", deployment."host" FROM "ActiveDeployment" active
+       LEFT JOIN "Deployment" deployment ON deployment."id" = active."id"
+       JOIN "Site" site ON site."id" = active."siteId"`);
     return active.rows;
   }, route => inspectRoute(socketPath, route));
   const retirement = createRetirementClient(socketPath);
