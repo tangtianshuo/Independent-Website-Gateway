@@ -69,6 +69,8 @@ export function validateLead(input: unknown): ValidatedLead {
     const field = text(raw, 1000, `field ${key}`);
     if (field !== undefined) safeFields[key] = field;
   }
+  if (!normalizedEmail && !phone && !message && Object.keys(safeFields).length === 0)
+    throw new Error('Lead requires contact details');
   const dedupeSource =
     value.idempotencyKey?.trim() ||
     [
@@ -77,7 +79,6 @@ export function validateLead(input: unknown): ValidatedLead {
       message || '',
       JSON.stringify(safeFields),
     ].join('|');
-  if (!dedupeSource) throw new Error('Lead requires contact details');
   const dedupeKey = createHash('sha256')
     .update(`${value.siteId}|${value.source}|${dedupeSource}`)
     .digest('hex');

@@ -46,12 +46,10 @@ export function validateEvent(
   const releaseId = bounded(value.releaseId, 128, 'release');
   const referrer = bounded(value.referrer, 1000, 'referrer');
   const device = bounded(value.device, 80, 'device');
-  const visitorHash = value.visitorId
-    ? createHash('sha256').update(value.visitorId).digest('hex')
-    : undefined;
-  const sessionHash = value.sessionId
-    ? createHash('sha256').update(value.sessionId).digest('hex')
-    : undefined;
+  const visitorId = bounded(value.visitorId, 128, 'visitor identifier');
+  const sessionId = bounded(value.sessionId, 128, 'session identifier');
+  const visitorHash = visitorId ? createHash('sha256').update(visitorId).digest('hex') : undefined;
+  const sessionHash = sessionId ? createHash('sha256').update(sessionId).digest('hex') : undefined;
   return {
     siteId: value.siteId,
     path: value.path,

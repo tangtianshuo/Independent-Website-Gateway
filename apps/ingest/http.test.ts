@@ -146,6 +146,40 @@ run('independent public intake HTTP', () => {
     expect((await handler(request('events', { path: '/api/private' }))).status).toBe(400);
     expect((await handler(request('leads', undefined, {}, randomUUID()))).status).toBe(404);
   });
+  it('rejects empty leads before writing even when an idempotency key is supplied', async () => {
+    for (const body of [
+      { source: 'contact' },
+      {
+        source: 'contact',
+        name: 'Visitor',
+        email: '',
+        phone: '',
+        message: '',
+        fields: { request: '' },
+      },
+    ]) {
+      const response = await handler(
+        request('leads', body, { 'x-lead-idempotency-key': 'empty-retry' }),
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'invalid_payload' });
+    }
+    expect((await pool.query('SELECT id FROM "Lead" WHERE "siteId"=$1', [siteId])).rowCount).toBe(
+      0,
+    );
+  });
+  it('returns non-retryable 400 for malformed visitor and session identifiers without writing', async () => {
+    for (const key of ['visitorId', 'sessionId']) {
+      for (const invalid of [{ nested: true }, [], 42, true, null, 'x'.repeat(129)]) {
+        const response = await handler(request('events', { path: '/catalog', [key]: invalid }));
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: 'invalid_payload' });
+      }
+    }
+    expect(
+      (await pool.query('SELECT id FROM "AnalyticsEvent" WHERE "siteId"=$1', [siteId])).rowCount,
+    ).toBe(0);
+  });
   it('only accepts explicitly configured loopback origins', async () => {
     const { createIngestHandler } = await import('./http');
     const local = createIngestHandler(pool, { localOrigins: ['http://127.0.0.1:13001'] });

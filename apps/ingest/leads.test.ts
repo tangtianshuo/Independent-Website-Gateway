@@ -36,6 +36,31 @@ test('rejects unsupported sources, unsafe fields and honeypot submissions', () =
   );
 });
 
+test('rejects leads without substantive details even with a retry key', () => {
+  for (const body of [
+    {},
+    { email: '', phone: '', message: '', fields: {} },
+    { fields: { request: '' } },
+    { name: 'Visitor', idempotencyKey: 'retry-key' },
+  ]) {
+    assert.throws(
+      () => validateLead({ siteId, source: 'contact', ...body }),
+      /requires contact details/i,
+    );
+  }
+});
+
+test('accepts a contact, message or substantive custom field independently', () => {
+  for (const details of [
+    { email: 'visitor@example.test' },
+    { phone: '123456789' },
+    { message: 'Please call' },
+    { fields: { request: 'A quote' } },
+  ]) {
+    assert.doesNotThrow(() => validateLead({ siteId, source: 'contact', ...details }));
+  }
+});
+
 test('persists a lead once, reports duplicates and rate limits an IP', async () => {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const query = async (sql: string, params: unknown[] = []) => {

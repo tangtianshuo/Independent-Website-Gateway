@@ -23,6 +23,25 @@ test('rejects unsafe and reserved paths', () => {
   assert.throws(() => validateEvent({ siteId, path: '/bad\npath' }), /identity/i);
 });
 
+test('validates visitor and session identifiers as bounded optional strings before hashing', () => {
+  for (const key of ['visitorId', 'sessionId']) {
+    for (const invalid of [{ nested: true }, [], 42, true, null, 'x'.repeat(129)]) {
+      assert.throws(() => validateEvent({ siteId, path: '/', [key]: invalid }), /invalid/i);
+    }
+  }
+  const maximum = validateEvent({
+    siteId,
+    path: '/',
+    visitorId: 'v'.repeat(128),
+    sessionId: 's'.repeat(128),
+  });
+  assert.equal(maximum.visitorHash?.length, 64);
+  assert.equal(maximum.sessionHash?.length, 64);
+  const anonymous = validateEvent({ siteId, path: '/', visitorId: '', sessionId: '' });
+  assert.equal(anonymous.visitorHash, undefined);
+  assert.equal(anonymous.sessionHash, undefined);
+});
+
 test('persists an event without blocking on aggregation', async () => {
   let call = '';
   const pool = {
