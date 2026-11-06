@@ -47,6 +47,7 @@ const url = process.env.GATEWAY_TEST_DATABASE_URL;
       expect(await router.readRoute(a.siteId)).toBeUndefined();
       expect((await pool.query('SELECT "isPrimary" FROM "Domain" WHERE "id"=$1',[customId])).rows[0].isPrimary).toBe(true);
       expect(await provisionSite(pool,instance,input,'different.example')).toEqual(a);
+      await check(customId,false); // Failed recheck must not change the committed active host on a later failed switch.
       expect((await mutateDomain(req(),a.siteId,id,'primary',pool)).status).toBe(202);
       await router.applyRoute(a.siteId,1,12345,'custom.example.com','old-token','container','release');
       // Route-only fixture tests failure protection; full publication is covered by the e2e runner.
@@ -71,6 +72,7 @@ const url = process.env.GATEWAY_TEST_DATABASE_URL;
       expect((await pool.query('SELECT "status","error" FROM "DomainChange" WHERE "siteId"=$1',[a.siteId])).rows[0]).toEqual({status:'succeeded',error:null});
       expect((await pool.query('SELECT "isPrimary" FROM "Domain" WHERE "id"=$1',[id])).rows[0].isPrimary).toBe(true);
       expect((await router.readRoute(a.siteId))?.host).toBe(new URL(a.siteUrl).hostname);
+      await check(customId);
       // A lost COMMIT acknowledgement must retain a possibly committed route.
       expect((await mutateDomain(req(),a.siteId,customId,'primary',pool)).status).toBe(202);
       const uncertain={connect:async()=>{const client=await pool.connect();return {query:async(sql:string,values?:unknown[])=>{const result=await client.query(sql,values);if(sql==='COMMIT')throw Error('lost commit acknowledgement');return result;},release:()=>client.release()};}};

@@ -26,9 +26,15 @@ export async function processDomainChange(pool: Pool, router: DomainRouter, veri
     if (!intent) {await client.query('ROLLBACK');return false;}
     const committed=await readDomainRoute(client as unknown as Pick<Pool,'query'>,intent.siteId);
     const route=await router.readRoute(intent.siteId);
-    const active=(await client.query('SELECT "releaseId","routeRevision" FROM "ActiveDeployment" WHERE "siteId"=$1',[intent.siteId])).rows[0];
+    const active=(await client.query('SELECT active."releaseId",active."routeRevision",deployment."host" FROM "ActiveDeployment" active LEFT JOIN "Deployment" deployment ON deployment."id"=active."id" WHERE active."siteId"=$1',[intent.siteId])).rows[0];
     if (active && (!route || route.releaseId!==active.releaseId || route.revision!==active.routeRevision)) throw Error('Active route unavailable on this worker');
-    if (route) old={...route,host:committed.host,redirectHosts:committed.redirectHosts};
+    if (route) {
+      const primary=(await client.query('SELECT "hostname" FROM "Domain" WHERE "siteId"=$1 AND "isPrimary"=true',[intent.siteId])).rows[0];
+      // Rollback is the committed serving identity, regardless of a later failed
+      // readiness recheck. A ready-host fallback is only a new-route selection.
+      const host=active?.host || primary?.hostname || route.host;
+      old={...route,host,redirectHosts:[committed.host,...committed.redirectHosts].filter(value=>value && value!==host)};
+    }
     const domain=(await client.query('SELECT * FROM "Domain" WHERE "id"=$1 AND "siteId"=$2 FOR UPDATE',[intent.domainId,intent.siteId])).rows[0];
     if (!domain) throw Error('Domain not found');
     if (intent.operation==='primary') {
