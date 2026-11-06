@@ -141,7 +141,7 @@ export async function mutateDomain(request: Request, siteId: string, domainId: s
     if (pending) return pending.domainId===domainId && pending.operation===operation && pending.enabled===enabled ? json(pending,202) : json({error:'domain_change_pending'},409);
     if ((await client.query(`SELECT 1 FROM "PublishOperation" WHERE "siteId"=$1 AND "status"='pending'`,[siteId])).rowCount) return json({error:'publish_pending'},409);
     const id=randomUUID();
-    await client.query(`INSERT INTO "DomainChange" ("siteId","id","domainId","operation","enabled") VALUES ($1,$2,$3,$4,$5) ON CONFLICT ("siteId") DO UPDATE SET "id"=$2,"domainId"=$3,"operation"=$4,"enabled"=$5,"status"='pending',"error"=NULL,"updatedAt"=now()`,[siteId,id,domainId,operation,enabled]);
+    await client.query(`INSERT INTO "DomainChange" ("siteId","id","domainId","operation","enabled") VALUES ($1,$2,$3,$4,$5) ON CONFLICT ("siteId") DO UPDATE SET "id"=$2,"domainId"=$3,"operation"=$4,"enabled"=$5,"status"='pending',"error"=NULL,"retryAfter"=now(),"updatedAt"=now()`,[siteId,id,domainId,operation,enabled]);
     await client.query('COMMIT'); return json({id,status:'pending'},202);
   } catch {return json({error:'domain_unavailable'},503);}
   finally {await client.query('ROLLBACK').catch(()=>undefined);client.release();}

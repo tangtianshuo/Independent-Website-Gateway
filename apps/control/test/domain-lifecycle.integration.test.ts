@@ -11,6 +11,8 @@ import { processDomainChange, projectReservedDomains } from '../../../packages/w
 import { createLocalRouter } from '../../../packages/worker/src/runtime';
 import { createPublishOperation } from '../src/publish';
 import { readDomainState } from '../../../packages/traffic/src/state';
+import { scheduleWorkerOperations } from '../../../packages/worker/src/scheduling';
+import { failPublishOperation } from '../../../packages/worker/src/operations';
 import { createTrafficProxy } from '../../../packages/traffic/src/index';
 const url = process.env.GATEWAY_TEST_DATABASE_URL;
 (url ? describe : describe.skip)('Gateway domain lifecycle SQL', () => {
@@ -77,7 +79,7 @@ const url = process.env.GATEWAY_TEST_DATABASE_URL;
       // A lost COMMIT acknowledgement must retain a possibly committed route.
       expect((await mutateDomain(req(),a.siteId,customId,'primary',pool)).status).toBe(202);
       const uncertain={connect:async()=>{const client=await pool.connect();return {query:async(sql:string,values?:unknown[])=>{const result=await client.query(sql,values);if(sql==='COMMIT')throw Error('lost commit acknowledgement');return result;},release:()=>client.release()};}};
-      await expect(processDomainChange(uncertain as unknown as Pool,restarted,async()=>true)).rejects.toThrow('lost commit acknowledgement');
+      expect(await processDomainChange(uncertain as unknown as Pool,restarted,async()=>true)).toBe(true);
       expect((await restarted.readRoute(a.siteId))?.host).toBe('custom.example.com');
       expect((await pool.query('SELECT "status" FROM "DomainChange" WHERE "siteId"=$1',[a.siteId])).rows[0].status).toBe('succeeded');
       expect((await pool.query('SELECT "isPrimary" FROM "Domain" WHERE "id"=$1',[customId])).rows[0].isPrimary).toBe(true);
@@ -101,7 +103,7 @@ const url = process.env.GATEWAY_TEST_DATABASE_URL;
 // Real PostgreSQL, production durable router and public traffic; only the runtime
 // container is represented by a host-sensitive loopback server in these faults.
 interface PublishedDomainFixture {
-  pool: Pool;
+  pool: Pool; instance: string;
   site: Awaited<ReturnType<typeof provisionSite>>;
   req: (body?: unknown) => Request;
   check: (id: string, https?: boolean) => Promise<Response>;
@@ -120,7 +122,7 @@ async function withPublishedDomains(run: (fixture: PublishedDomainFixture) => Pr
   const instance = randomUUID(), input = {cmsWorkspaceId:randomUUID(),cmsSiteId:randomUUID(),name:'fault',requestKey:randomUUID()};
   process.env.CMS_SERVICE_SECRET='test-secret'; process.env.CMS_INSTANCE_ID=instance;
   const site = await provisionSite(pool,instance,input,'sites.localhost');
-  const defaultHost = new URL(site.siteUrl).hostname, primaryHost='primary.example.test', aliasHost='alias.example.test';
+  const defaultHost = new URL(site.siteUrl).hostname, primaryHost='primary-'+site.siteId+'.example.test', aliasHost='alias-'+site.siteId+'.example.test';
   const req=(body?:unknown)=>new Request('http://localhost',{method:'POST',headers:{authorization:'Bearer test-secret','X-CMS-Workspace':input.cmsWorkspaceId,'X-CMS-Site':input.cmsSiteId},body:JSON.stringify(body??{})});
   const unhealthy = new Set<string>();
   const upstream = createServer((req,res)=>{res.writeHead(unhealthy.has(req.headers.host || '')?503:200);res.end('published '+req.headers.host);});
@@ -150,10 +152,10 @@ async function withPublishedDomains(run: (fixture: PublishedDomainFixture) => Pr
       durable:JSON.parse(await readFile(state,'utf8')).routes.find((row:{siteId:string})=>row.siteId===site.siteId).host,
     });
     const active=async()=> (await pool.query('SELECT active."siteId",active."releaseId",active."routeRevision",deployment."host" FROM "ActiveDeployment" active JOIN "Deployment" deployment ON deployment."id"=active."id" WHERE active."siteId"=$1',[site.siteId])).rows;
-    await run({pool,site,req,check,defaultId,primaryId,aliasId,defaultHost,primaryHost,aliasHost,unhealthy,port,router,state,fetchHost,status,active});
+    await run({pool,instance,site,req,check,defaultId,primaryId,aliasId,defaultHost,primaryHost,aliasHost,unhealthy,port,router,state,fetchHost,status,active});
   } finally {
     await proxy.close();upstream.closeAllConnections();await new Promise<void>(resolve=>upstream.close(()=>resolve()));
-    for(const table of ['DomainChange','ActiveDeployment','Deployment','ReleaseArtifact','Release','SourceSiteBinding','Domain'])await pool.query('DELETE FROM "'+table+'" WHERE "siteId"=$1',[site.siteId]);
+    for(const table of ['DomainChange','PublishOperation','Publication','ActiveDeployment','Deployment','ReleaseArtifact','Release','SourceSiteBinding','Domain'])await pool.query('DELETE FROM "'+table+'" WHERE "siteId"=$1',[site.siteId]);
     await pool.query('DELETE FROM "SourceWorkspaceBinding" WHERE "instanceId"=$1',[instance]);
     await pool.query('DELETE FROM "Site" WHERE "id"=$1',[site.siteId]);await pool.query('DELETE FROM "Workspace" WHERE "id"=$1',[site.workspaceId]);
     await pool.end();await rm(directory,{recursive:true,force:true});
@@ -175,10 +177,11 @@ async function withPublishedDomains(run: (fixture: PublishedDomainFixture) => Pr
     await f.router.applyRoute(f.site.siteId,1,f.port,f.defaultHost,'crashed','container','release',[f.primaryHost]);
     f.unhealthy.add(f.defaultHost);f.unhealthy.add(f.primaryHost);
     const restarted=createLocalRouter(f.state);await restarted.recover(f.active,async()=>true);
-    await processDomainChange(f.pool,restarted).catch(()=>undefined);
+    expect(await processDomainChange(f.pool,restarted)).toBe(true);
     expect(await f.status()).toEqual({primary:f.primaryHost,deployment:f.primaryHost,intent:'pending',durable:f.defaultHost});
     f.unhealthy.delete(f.primaryHost);
-    await restarted.recover(f.active,async()=>true);await processDomainChange(f.pool,restarted);
+    await f.pool.query('UPDATE "DomainChange" SET "retryAfter"=now() WHERE "siteId"=$1',[f.site.siteId]);
+    await processDomainChange(f.pool,restarted);
     expect(await f.status()).toEqual({primary:f.primaryHost,deployment:f.primaryHost,intent:'failed',durable:f.primaryHost});
     expect((await f.fetchHost(f.primaryHost)).status).toBe(200);
   }));
@@ -193,4 +196,53 @@ async function withPublishedDomains(run: (fixture: PublishedDomainFixture) => Pr
     const alias=await f.pool.query('SELECT "enabled" FROM "Domain" WHERE "id"=$1',[f.aliasId]);
     if(operation==='remove')expect(alias.rowCount).toBe(0);else expect(alias.rows[0].enabled).toBe(false);
   }));
+});
+
+
+(url ? describe : describe.skip)('domain recovery scheduler isolation',()=>{
+  it('defers unavailable A while B publication and domain work progress, then recovers A',async()=>withPublishedDomains(async a=>withPublishedDomains(async b=>{
+    process.env.CMS_INSTANCE_ID=a.instance;
+    expect((await mutateDomain(a.req(),a.site.siteId,a.defaultId,'primary',a.pool)).status).toBe(202);
+    expect((await createPublishOperation(a.req({releaseId:'release',idempotencyKey:'blocked-a',expectedRevision:0}),a.site.siteId,a.pool)).status).toBe(409);
+    await a.router.applyRoute(a.site.siteId,1,a.port,a.defaultHost,'crashed','container','release',[a.primaryHost]);
+    a.unhealthy.add(a.defaultHost);a.unhealthy.add(a.primaryHost);
+    await a.router.applyRoute(b.site.siteId,1,b.port,b.primaryHost,'committed-b','container-b','release',[b.defaultHost,b.aliasHost]);
+    const router=createLocalRouter(a.state);
+    const active=async()=>[...await a.active(),...await b.active()];
+    await router.recover(active,async()=>true);
+    process.env.CMS_INSTANCE_ID=b.instance;
+    const publish=await createPublishOperation(b.req({releaseId:'release',idempotencyKey:'progress-b',expectedRevision:0}),b.site.siteId,b.pool);
+    expect(publish.status).toBe(201);
+    const workerId=randomUUID();
+    // This is the exact production domain-then-publication sequence, without a
+    // test-local catch that could mask publication being skipped by an error.
+    const claim=await scheduleWorkerOperations(a.pool,router,workerId);
+    expect(claim?.siteId).toBe(b.site.siteId);
+    expect((await a.status()).intent).toBe('pending');
+    expect((await a.pool.query('SELECT "retryAfter">clock_timestamp() AS deferred,"error" FROM "DomainChange" WHERE "siteId"=$1',[a.site.siteId])).rows[0]).toEqual({deferred:true,error:'Active route unavailable on this worker; recovery required'});
+    process.env.CMS_INSTANCE_ID=a.instance;
+    expect((await createPublishOperation(a.req({releaseId:'release',idempotencyKey:'still-blocked-a',expectedRevision:0}),a.site.siteId,a.pool)).status).toBe(409);
+    process.env.CMS_INSTANCE_ID=b.instance;
+    expect((await b.pool.query('SELECT "attempts","leaseOwner" FROM "PublishOperation" WHERE "id"=$1',[claim!.id])).rows[0]).toEqual({attempts:1,leaseOwner:workerId});
+    expect(await failPublishOperation(b.pool,{operationId:claim!.id,workerId,attempts:claim!.attempts,leaseUntil:claim!.leaseUntil,failureCode:'CANDIDATE_CREATE_FAILED'})).toBe(true);
+    expect((await mutateDomain(b.req({enabled:false}),b.site.siteId,b.aliasId,'state',b.pool)).status).toBe(202);
+    // A stays the oldest pending intent. A later domain operation must still run.
+    expect(await scheduleWorkerOperations(a.pool,router,workerId)).toBeNull();
+    expect((await b.pool.query('SELECT "status" FROM "DomainChange" WHERE "siteId"=$1',[b.site.siteId])).rows[0].status).toBe('succeeded');
+    expect((await a.status()).intent).toBe('pending');
+    expect((await a.fetchHost(b.primaryHost)).status).toBe(200);
+    expect((await a.fetchHost(b.aliasHost)).status).toBe(404);
+    const bBeforeRecovery=await router.readRoute(b.site.siteId);
+    a.unhealthy.delete(a.primaryHost);
+    // Let the durable retry become eligible; production recovery runs on retry.
+    await a.pool.query('UPDATE "DomainChange" SET "retryAfter"=now() WHERE "siteId"=$1',[a.site.siteId]);
+    expect(await scheduleWorkerOperations(a.pool,router,workerId)).toBeNull();
+    expect(await a.status()).toEqual({primary:a.primaryHost,deployment:a.primaryHost,intent:'failed',durable:a.primaryHost});
+    expect((await a.fetchHost(a.primaryHost)).status).toBe(200);
+    expect(await a.fetchHost(a.defaultHost)).toMatchObject({status:301,location:'https://'+a.primaryHost+'/catalog?sort=new'});
+    expect(await router.readRoute(b.site.siteId)).toEqual(bBeforeRecovery);
+    expect(JSON.parse(await readFile(a.state,'utf8')).routes.find((route:{siteId:string})=>route.siteId===b.site.siteId)).toEqual(bBeforeRecovery);
+    expect((await a.fetchHost(b.primaryHost)).status).toBe(200);
+    expect((await a.fetchHost(b.aliasHost)).status).toBe(404);
+  })));
 });

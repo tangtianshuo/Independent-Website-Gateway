@@ -1,0 +1,1 @@
+ALTER TABLE "DomainChange" ADD COLUMN "retryAfter" TIMESTAMPTZ NOT NULL DEFAULT now();

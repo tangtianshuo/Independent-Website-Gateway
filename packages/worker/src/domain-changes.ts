@@ -8,6 +8,7 @@ export async function projectReservedDomains(pool: Pick<Pool, 'query'>, path: st
   await writeDomainState(path,result.rows.map(row=>row.hostname));
 }
 interface DomainRouter {
+  recover?(active: () => Promise<{siteId:string;releaseId:string;routeRevision:number;host?:string|null}[]>, valid: (route:Route) => Promise<boolean>, onlySiteId?:string): Promise<void>;
   readRoute(siteId: string): Promise<Route | undefined>;
   applyRoute(siteId:string,revision:number,port:number,host:string,token:string,containerId?:string,releaseId?:string,redirectHosts?:string[]): Promise<void>;
 }
@@ -21,14 +22,24 @@ export async function processDomainChange(pool: Pool, router: DomainRouter, veri
   let committing=false;
   let recoveryRequired=false;
   let intent: {siteId:string;id:string;domainId:string;operation:string;enabled:boolean|null} | undefined;
+  const defer = async (reason: unknown): Promise<boolean> => {
+    await client.query('ROLLBACK');
+    await client.query(`UPDATE "DomainChange" SET "retryAfter"=clock_timestamp()+interval '5 seconds',"updatedAt"=clock_timestamp(),"error"=$1 WHERE "siteId"=$2 AND "id"=$3 AND "status"='pending'`,
+      [reason instanceof Error ? reason.message.slice(0,300) : 'Domain recovery pending',intent!.siteId,intent!.id]);
+    return true;
+  };
   try {
     await client.query('BEGIN');
-    intent=(await client.query(`SELECT change.* FROM "DomainChange" change JOIN "Site" site ON site."id"=change."siteId" WHERE change."status"='pending' AND NOT EXISTS(SELECT 1 FROM "PublishOperation" operation WHERE operation."siteId"=site."id" AND operation."status"='pending') ORDER BY change."updatedAt" FOR UPDATE OF site,change SKIP LOCKED LIMIT 1`)).rows[0];
+    intent=(await client.query(`SELECT change.* FROM "DomainChange" change JOIN "Site" site ON site."id"=change."siteId" WHERE change."status"='pending' AND change."retryAfter"<=now() AND NOT EXISTS(SELECT 1 FROM "PublishOperation" operation WHERE operation."siteId"=site."id" AND operation."status"='pending') ORDER BY change."updatedAt",change."siteId" FOR UPDATE OF site,change SKIP LOCKED LIMIT 1`)).rows[0];
     if (!intent) {await client.query('ROLLBACK');return false;}
     recoveryRequired=true;
     const committed=await readDomainRoute(client as unknown as Pick<Pool,'query'>,intent.siteId);
-    const route=await router.readRoute(intent.siteId);
+    let route=await router.readRoute(intent.siteId);
     const active=(await client.query('SELECT active."releaseId",active."routeRevision",deployment."host" FROM "ActiveDeployment" active LEFT JOIN "Deployment" deployment ON deployment."id"=active."id" WHERE active."siteId"=$1',[intent.siteId])).rows[0];
+    if (active && (!route || route.releaseId!==active.releaseId || route.revision!==active.routeRevision)) {
+      await router.recover?.(async()=>[{...active,siteId:intent!.siteId}],verify,intent.siteId);
+      route=await router.readRoute(intent.siteId);
+    }
     if (active && (!route || route.releaseId!==active.releaseId || route.revision!==active.routeRevision)) {
       throw Error('Active route unavailable on this worker; recovery required');
     }
@@ -72,14 +83,17 @@ export async function processDomainChange(pool: Pool, router: DomainRouter, veri
   } catch (error) {
     // An ambiguous COMMIT must not undo a possibly committed route. The durable
     // intent is either succeeded or still pending and will converge on retry.
-    if (committing || recoveryRequired) throw error;
+    if (!intent) throw error;
+    if (committing || recoveryRequired) return await defer(error);
     // Restore before releasing the Site lock. If restoration fails leave the
     // intent pending; next tick/restart retries it instead of reporting success.
     if (old) {
       // Never report a terminal failure while an uncommitted public route is
       // left behind. An unavailable committed target leaves the intent pending.
-      if (!await verify(old)) throw Error('Committed route unavailable; recovery required');
-      await router.applyRoute(old.siteId,old.revision,old.port,old.host,old.token,old.containerId,old.releaseId,old.redirectHosts);
+      try {
+        if (!await verify(old)) throw Error('Committed route unavailable; recovery required');
+        await router.applyRoute(old.siteId,old.revision,old.port,old.host,old.token,old.containerId,old.releaseId,old.redirectHosts);
+      } catch (restoreError) { return await defer(restoreError); }
     }
     await client.query('ROLLBACK');
     if (intent) await client.query(`UPDATE "DomainChange" SET "status"='failed',"error"=$1,"updatedAt"=now() WHERE "siteId"=$2 AND "id"=$3 AND "status"='pending'`,[(error as Error).message.slice(0,300),intent.siteId,intent.id]);

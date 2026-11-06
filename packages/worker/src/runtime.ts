@@ -30,8 +30,12 @@ function validRoute(route: Route): boolean {
 export function createLocalRouter(statePath?: string, validateTarget?: (route: Route) => Promise<boolean>) {
   const routes = new Map<string, Route>();
   const previous = new Map<string, Route>();
+  // Keep the complete durable snapshot separately from healthy in-memory
+  // routes: another site's write must not discard an unresolved recovery.
+  let persistedRoutes = new Map<string, Route>();
+  let persistedPrevious = new Map<string, Route>();
   async function persist(current: Map<string, Route>, prior: Map<string, Route>) {
-    if (!statePath) return;
+    if (!statePath) { persistedRoutes=new Map(current); persistedPrevious=new Map(prior); return; }
     const temp = `${statePath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
     try {
       const file = await open(temp, 'wx', 0o600);
@@ -43,6 +47,7 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
         try { await directory.sync(); } finally { await directory.close(); }
       }
     } finally { await unlink(temp).catch(() => undefined); }
+    persistedRoutes=new Map(current); persistedPrevious=new Map(prior);
   }
   const server: Server = createServer((request, response) => {
     const host = request.headers.host?.toLowerCase().replace(/:\d+$/, '');
@@ -74,8 +79,8 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
       const route = { siteId, revision, port, host, token, containerId, releaseId, ...(redirectHosts?.length ? { redirectHosts } : {}) };
       if (!hostPattern.test(host) || !Number.isSafeInteger(port) || port < 1024 || port > 65535 ||
           (statePath && !validRoute(route))) throw new Error('Invalid route');
-      const next = new Map(routes);
-      const prior = new Map(previous);
+      const next = new Map(persistedRoutes);
+      const prior = new Map(persistedPrevious);
       const old = routes.get(siteId);
       if (old && validRoute(old)) prior.set(siteId, old);
       else prior.delete(siteId);
@@ -91,8 +96,8 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
     },
     async restoreRoute(siteId: string, token: string, old: Route | undefined) {
       if (routes.get(siteId)?.token !== token) return false;
-      const next = new Map(routes);
-      const prior = new Map(previous);
+      const next = new Map(persistedRoutes);
+      const prior = new Map(persistedPrevious);
       if (old) next.set(siteId, old); else next.delete(siteId);
       prior.delete(siteId);
       await persist(next, prior);
@@ -100,16 +105,18 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
       previous.delete(siteId);
       return true;
     },
-    async recover(activeDeployments: () => Promise<{ siteId: string; releaseId: string; routeRevision: number; host?: string | null }[]>, valid: (route: Route) => Promise<boolean>) {
+    async recover(activeDeployments: () => Promise<{ siteId: string; releaseId: string; routeRevision: number; host?: string | null }[]>, valid: (route: Route) => Promise<boolean>, onlySiteId?: string) {
       if (!statePath) return;
       let saved: { routes: Route[]; previous: Route[] };
       try { saved = JSON.parse(await readFile(statePath, 'utf8')) as typeof saved; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
       if (!Array.isArray(saved.routes) || !Array.isArray(saved.previous)) throw new Error('Invalid route state');
+      persistedRoutes = new Map(saved.routes.filter(validRoute).map(route => [route.siteId, route]));
+      persistedPrevious = new Map(saved.previous.filter(validRoute).map(route => [route.siteId, route]));
       const active = await activeDeployments();
       const all = [...saved.routes, ...saved.previous];
       const recovered = new Map<string, Route>();
-      for (const deployment of active) {
+      for (const deployment of active.filter(item => !onlySiteId || item.siteId === onlySiteId)) {
         const matches = all.filter(route => validRoute(route) && route.siteId === deployment.siteId &&
           route.revision === deployment.routeRevision && route.releaseId === deployment.releaseId &&
           (!deployment.host || route.host === deployment.host));
@@ -134,7 +141,8 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
         }
       }
       if (changed) await persist(durable, prior);
-      routes.clear(); previous.clear();
+      if (onlySiteId) { routes.delete(onlySiteId); previous.delete(onlySiteId); }
+      else { routes.clear(); previous.clear(); }
       for (const [site, route] of recovered) {
         routes.set(site, route);
         const prior = saved.previous.find(item => validRoute(item) && item.siteId === site && item.containerId !== route.containerId);

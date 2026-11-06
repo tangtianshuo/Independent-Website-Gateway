@@ -102,6 +102,7 @@ model DomainChange {
   status String @default("pending")
   error String?
   updatedAt DateTime @default(now()) @db.Timestamptz(6)
+  retryAfter DateTime @default(now()) @db.Timestamptz(6)
 }
 
 model Domain {
