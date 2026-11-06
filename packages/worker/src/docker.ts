@@ -13,7 +13,7 @@ export interface Candidate {
 }
 interface DockerRequest { method: 'POST' | 'DELETE'; path: string; body?: Record<string, unknown> }
 interface DockerClient { request(request: DockerRequest): Promise<{ Id: string }> }
-interface DockerConfig { network: string; images: readonly ImageIdentity[] }
+interface DockerConfig { network: string; images: readonly ImageIdentity[]; ingestOrigin?: string }
 
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const repositoryPattern = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*)(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$/;
@@ -27,6 +27,12 @@ export function createDockerCandidateAdapter(client: DockerClient, config: Docke
   if (!networkPattern.test(config.network)) throw new Error('Invalid candidate network');
   if (!config.images.length || config.images.some(({ repository, digest }) =>
     !(repository === 'local' || repositoryPattern.test(repository)) || !digestPattern.test(digest))) throw new Error('Invalid approved image');
+  const ingestOrigin = config.ingestOrigin || '';
+  if (ingestOrigin) {
+    let valid = false;
+    try { const url = new URL(ingestOrigin); valid = url.origin === ingestOrigin && !url.username && !url.password && (url.protocol === 'https:' || url.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(url.hostname)); } catch { /* Invalid configuration fails before Docker. */ }
+    if (!valid) throw new Error('Invalid public intake origin');
+  }
   const approvedImages = new Set(config.images.map(({ repository, digest }) => `${repository}@${digest}`));
   return {
     async startCandidate({ siteId, releaseId, image, workspaceId, credential, gatewayUrl, hostPort, snapshotRef }: Candidate): Promise<string> {
@@ -43,7 +49,7 @@ export function createDockerCandidateAdapter(client: DockerClient, config: Docke
       const created = await client.request({ method: 'POST', path: `/containers/create?name=${name}`, body: {
         Image: imageRef,
         User: '10001:10001',
-        Env: [`SITE_ID=${siteId}`, `RELEASE_ID=${releaseId}`, `NUXT_WORKSPACE_ID=${workspaceId}`, `NUXT_SITE_ID=${siteId}`, `NUXT_GATEWAY_URL=${gatewayUrl}`, `NUXT_SITE_CREDENTIAL=${credential}`,
+        Env: [`SITE_ID=${siteId}`, `RELEASE_ID=${releaseId}`, `NUXT_WORKSPACE_ID=${workspaceId}`, `NUXT_SITE_ID=${siteId}`, `NUXT_GATEWAY_URL=${gatewayUrl}`, `NUXT_SITE_CREDENTIAL=${credential}`, `NUXT_PUBLIC_INGEST_ORIGIN=${ingestOrigin}`,
           ...(snapshotRef ? ['PUBLISHED_SNAPSHOT_PATH=/var/lib/gateway/artifacts/published.json'] : [])],
         Labels: { 'gateway.site-id': siteId, 'gateway.release-id': releaseId },
         HostConfig: {

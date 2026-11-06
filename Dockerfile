@@ -12,6 +12,7 @@ COPY . .
 
 RUN npm ci --no-audit --no-fund \
     && npm run build --workspace @gateway/worker \
+    && npm run build --workspace @gateway/ingest \
     && npm run build --workspace @gateway/control
 
 ARG SOURCE_COMMIT
@@ -21,6 +22,6 @@ LABEL org.opencontainers.image.revision="$SOURCE_COMMIT" \
 
 ENV NODE_ENV=production
 
-EXPOSE 18183
+EXPOSE 18183 18184
 
 CMD ["node", "node_modules/next/dist/bin/next", "start", "apps/control", "-p", "18183", "-H", "0.0.0.0"]

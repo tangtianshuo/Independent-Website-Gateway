@@ -55,6 +55,7 @@ function inspectRoute(socketPath: string, route: Route): Promise<boolean> {
 
 export async function runWorker() {
   const databaseUrl = process.env.DATABASE_URL;
+  const ingestOrigin = process.env.NUXT_PUBLIC_INGEST_ORIGIN || '';
   const digest = process.env.GATEWAY_APPROVED_IMAGE_DIGEST ?? '';
   const gatewayUrl = process.env.GATEWAY_CONTROL_URL;
   const platform = process.env.GATEWAY_DOCKER_PLATFORM || undefined;
@@ -124,7 +125,7 @@ export async function runWorker() {
             )) continue;
           }
           const claimDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: Math.min(15_000, Math.max(1, claim.leaseUntil.getTime() - Date.now() - 10_000)), approvedImages });
-          const adapter = createDockerCandidateAdapter(claimDocker, { network: 'gateway-sites', images: [image] });
+          const adapter = createDockerCandidateAdapter(claimDocker, { network: 'gateway-sites', images: [image], ingestOrigin });
           const credential = randomBytes(32).toString('hex');
           if (!await persistCandidateCredential(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, credential })) continue;
           let candidatePort = 0;

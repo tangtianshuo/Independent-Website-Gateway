@@ -53,7 +53,7 @@ test('creates and starts an approved immutable candidate with fixed isolation', 
   assert.deepEqual(create.body, {
     Image: `${repository}@${digest}`,
     User: '10001:10001',
-    Env: [`SITE_ID=${siteId}`, `RELEASE_ID=${releaseId}`, `NUXT_WORKSPACE_ID=${runtime.workspaceId}`, `NUXT_SITE_ID=${siteId}`, `NUXT_GATEWAY_URL=${runtime.gatewayUrl}`, `NUXT_SITE_CREDENTIAL=${runtime.credential}`],
+    Env: [`SITE_ID=${siteId}`, `RELEASE_ID=${releaseId}`, `NUXT_WORKSPACE_ID=${runtime.workspaceId}`, `NUXT_SITE_ID=${siteId}`, `NUXT_GATEWAY_URL=${runtime.gatewayUrl}`, `NUXT_SITE_CREDENTIAL=${runtime.credential}`, 'NUXT_PUBLIC_INGEST_ORIGIN='],
     Labels: { 'gateway.site-id': siteId, 'gateway.release-id': releaseId },
     HostConfig: {
       NetworkMode: 'gateway-sites', ReadonlyRootfs: true, Privileged: false, CapDrop: ['ALL'],
@@ -164,4 +164,18 @@ test('rejects unsafe trusted configuration before any Docker request', () => {
   assert.throws(() => createDockerCandidateAdapter(docker, { ...config, network: 'host' }), /network/i);
   assert.throws(() => createDockerCandidateAdapter(docker, { ...config, images: [{ repository, digest: 'latest' }] }), /image/i);
   assert.equal(docker.requests.length, 0);
+});
+
+test('injects the trusted public intake origin and ignores candidate overrides', async () => {
+  const docker = client();
+  const adapter = createDockerCandidateAdapter(docker, { ...config, ingestOrigin: 'https://intake.example' } as never);
+  await adapter.startCandidate({siteId,releaseId,image,...runtime,ingestOrigin:'https://attacker.example'} as never);
+  assert.ok((docker.requests[0].body!.Env as string[]).includes('NUXT_PUBLIC_INGEST_ORIGIN=https://intake.example'));
+});
+
+test('explicitly disables intake when no origin is configured and rejects unsafe config', async () => {
+  const docker = client();
+  await createDockerCandidateAdapter(docker,config).startCandidate({siteId,releaseId,image,...runtime});
+  assert.ok((docker.requests[0].body!.Env as string[]).includes('NUXT_PUBLIC_INGEST_ORIGIN='));
+  for(const ingestOrigin of ['https://intake.example/path','http://public.example','https://user:secret@intake.example']) assert.throws(()=>createDockerCandidateAdapter(docker,{...config,ingestOrigin} as never),/intake origin/i);
 });
