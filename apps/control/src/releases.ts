@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { Pool } from 'pg';
 import { canonicalJson, validateReleaseInput } from '@gateway/contracts';
 import { authenticateService } from './auth';
+import { artifactSnapshotPath, ensureArtifactReadable } from '../../../packages/worker/src/artifacts';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const maxRequestBytes = 14 * 1024 * 1024;
@@ -66,6 +67,9 @@ export async function receiveRelease(request: Request, routeSiteId: string): Pro
         await client.query('ROLLBACK');
         return Response.json({ error: 'release_conflict' }, { status: 409 });
       }
+      const directory = process.env.SNAPSHOT_STORAGE_PATH ?? '/var/lib/gateway/snapshots';
+      if (existing.rows[0].snapshotRef !== artifactSnapshotPath(directory, input.siteId, input.releaseId)) throw new Error('Invalid managed artifact path');
+      await ensureArtifactReadable(directory, input.siteId, input.releaseId, input.checksum);
       await client.query(`INSERT INTO "ReleaseArtifact"
         ("id", "siteId", "releaseId", "snapshotRef", "checksum", "assetManifestRef", "rendererDigest", "status", "updatedAt")
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
@@ -84,13 +88,14 @@ export async function receiveRelease(request: Request, routeSiteId: string): Pro
 
     const bytes = Buffer.from(input.snapshot, 'base64');
     const directory = process.env.SNAPSHOT_STORAGE_PATH ?? '/var/lib/gateway/snapshots';
-    await mkdir(directory, { recursive: true });
+    await mkdir(directory, { recursive: true, mode: 0o700 });
     const key = createHash('sha256').update(`${input.siteId}:${input.releaseId}`).digest('hex');
     finalPath = join(directory, `${key}.snapshot`);
     temporaryPath = join(directory, `${key}.${randomUUID()}.tmp`);
     await writeFile(temporaryPath, bytes, { flag: 'wx', mode: 0o600 });
     await link(temporaryPath, finalPath);
     ownsFinalPath = true;
+    await ensureArtifactReadable(directory, input.siteId, input.releaseId, input.checksum);
     await client.query('INSERT INTO "Release" ("id", "siteId", "releaseId", "checksum", "metadata", "snapshotRef") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [randomUUID(), input.siteId, input.releaseId, input.checksum, JSON.stringify(metadata), finalPath]);
     await client.query(`INSERT INTO "ReleaseArtifact"
       ("id", "siteId", "releaseId", "snapshotRef", "checksum", "assetManifestRef", "rendererDigest", "status", "updatedAt")

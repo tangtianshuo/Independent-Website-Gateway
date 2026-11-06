@@ -49,7 +49,7 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
     const route = host && [...routes.values()].find(item => item.host === host || item.redirectHosts?.includes(host));
     if (!route) { response.writeHead(404); response.end(); return; }
     void (async () => {
-      if (route.redirectHosts?.includes(host!)) {
+      if (host !== route.host && route.redirectHosts?.includes(host!)) {
         response.writeHead(301, { location: `https://${route.host}${request.url || '/'}`, 'cache-control': 'no-store' });
         response.end();
         return;

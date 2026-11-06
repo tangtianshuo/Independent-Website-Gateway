@@ -94,7 +94,7 @@ export async function finalizeAfterRouteVerification(pool: Pool, input: Finalize
     if (!release.rowCount) return false;
     await client.query(`INSERT INTO "ActiveDeployment" ("id", "siteId", "releaseId", "imageDigest", "routeRevision")
       VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT ("siteId") DO UPDATE SET "releaseId" = EXCLUDED."releaseId",
+      ON CONFLICT ("siteId") DO UPDATE SET "id" = EXCLUDED."id", "releaseId" = EXCLUDED."releaseId",
         "imageDigest" = EXCLUDED."imageDigest", "routeRevision" = EXCLUDED."routeRevision",
         "activatedAt" = now()`, [input.operationId, siteId, releaseId, input.imageDigest, desiredRevision]);
     await client.query(`INSERT INTO "Deployment"

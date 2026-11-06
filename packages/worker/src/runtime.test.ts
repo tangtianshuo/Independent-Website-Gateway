@@ -23,7 +23,8 @@ test('local router redirects aliases to the primary host', async () => {
   const router = createLocalRouter();
   await router.listen(0);
   try {
-    await router.applyRoute(siteId, 1, site.port, 'site.example.test', 'token', 'container', 'release', ['www.site.example.test']);
+    await router.applyRoute(siteId, 1, site.port, 'site.example.test', 'token', 'container', 'release', ['site.example.test', 'www.site.example.test']);
+    assert.equal((await fetchHost(router.port(), 'site.example.test')).body, 'published');
     assert.equal((await fetchHost(router.port(), 'www.site.example.test')).status, 301);
     assert.equal((await fetchHost(router.port(), 'foreign.example.test')).status, 404);
   } finally { await router.close(); await site.close(); }

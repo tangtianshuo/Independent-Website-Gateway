@@ -37,7 +37,7 @@ export interface DeploymentDependencies<Route> {
 }
 
 export async function deployCandidate<Route>(
-  claim: ClaimedOperation, image: ImageIdentity, dependencies: DeploymentDependencies<Route>, publicImage: ImageIdentity = image,
+  claim: ClaimedOperation, image: ImageIdentity, dependencies: DeploymentDependencies<Route>,
 ): Promise<boolean> {
   let previous: Route | undefined;
   let containerId: string | undefined;
@@ -72,14 +72,14 @@ export async function deployCandidate<Route>(
     await dependencies.applyRoute(claim.siteId, claim.desiredRevision, containerId, host, switchToken, redirectHosts);
     if (!await dependencies.verifyRoute(claim.siteId, claim.desiredRevision, host)) throw new Error('Route verification failed');
     failureCode = 'WORKER_INTERNAL_ERROR';
-    const pinIdentity = publicImage.repository === 'local' ? {} : {
-      imageRepository: publicImage.repository,
-      ...(publicImage.sourceCommit ? { sourceCommit: publicImage.sourceCommit } : {}),
-      ...(publicImage.manifestChecksum ? { manifestChecksum: publicImage.manifestChecksum } : {}),
+    const pinIdentity = image.repository === 'local' ? {} : {
+      imageRepository: image.repository,
+      ...(image.sourceCommit ? { sourceCommit: image.sourceCommit } : {}),
+      ...(image.manifestChecksum ? { manifestChecksum: image.manifestChecksum } : {}),
     };
     const finalized = await dependencies.finalizeAfterRouteVerification({
       operationId: claim.id, workerId: claim.leaseOwner, attempts: claim.attempts,
-      leaseUntil: claim.leaseUntil, imageDigest: publicImage.digest, host,
+      leaseUntil: claim.leaseUntil, imageDigest: image.digest, host,
       ...pinIdentity,
     });
     if (!finalized) throw new Error('Deployment finalize rejected');

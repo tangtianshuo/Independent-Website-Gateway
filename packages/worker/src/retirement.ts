@@ -84,7 +84,7 @@ export function createRetirementClient(socketPath: string): RetirementClient {
   };
 }
 
-export async function collectRetiredContainers(pool: Pool, routes: readonly Route[], docker: RetirementClient, runtimeImage?: string) {
+export async function collectRetiredContainers(pool: Pool, routes: readonly Route[], docker: RetirementClient) {
   const result = { removed: 0, failed: 0 };
   const containers = await docker.list();
   const protectedIds = new Set(routes.map(route => route.containerId));
@@ -119,7 +119,7 @@ export async function collectRetiredContainers(pool: Pool, routes: readonly Rout
         if (!release) continue;
         budget--;
         try {
-          if (await docker.retire(container.Id, { siteId, workspaceId: site.rows[0].workspaceId, releaseId: release.releaseId, image: runtimeImage ?? release.image })) result.removed++;
+          if (await docker.retire(container.Id, { siteId, workspaceId: site.rows[0].workspaceId, releaseId: release.releaseId, image: release.image })) result.removed++;
         } catch { result.failed++; }
       }
       await client.query('COMMIT');

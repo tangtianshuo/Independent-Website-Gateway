@@ -92,7 +92,7 @@ export async function readDomainState(request: Request, siteId: string, database
       id: row.id!, hostname: row.hostname!, ownershipStatus: row.ownershipStatus || 'pending', dnsStatus: row.dnsStatus || 'pending',
       certificateStatus: row.certificateStatus || 'pending', enabled: row.enabled !== false, role: row.isPrimary ? 'primary' : 'alias',
       lastCheckedAt: row.lastCheckedAt instanceof Date ? row.lastCheckedAt.toISOString() : row.lastCheckedAt || null,
-      redirectTo: row.isPrimary || !primaryHost ? null : `https://${primaryHost}`,
+      redirectTo: row.hostname === primaryHost || !primaryHost ? null : `https://${primaryHost}`,
     }));
     return json({ route, domains });
   } catch {

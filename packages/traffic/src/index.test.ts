@@ -33,7 +33,7 @@ test('traffic proxy forwards from the durable route snapshot without control or 
   const upstream = createServer((_request, response) => response.end('published'));
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
   const upstreamPort = (upstream.address() as { port: number }).port;
-  await writeFile(state, JSON.stringify({ routes: [{ siteId: 'site-1', revision: 3, port: upstreamPort, host: 'site.example.test', redirectHosts: ['www.site.example.test'], token: 'token', containerId: 'container', releaseId: 'release-3' }], previous: [] }));
+  await writeFile(state, JSON.stringify({ routes: [{ siteId: 'site-1', revision: 3, port: upstreamPort, host: 'site.example.test', redirectHosts: ['site.example.test', 'www.site.example.test'], token: 'token', containerId: 'container', releaseId: 'release-3' }], previous: [] }));
   const proxy = createTrafficProxy(state); await proxy.listen(0);
   try {
     assert.deepEqual(await fetchHost(proxy.port(), 'site.example.test'), { status: 200, body: 'published' });

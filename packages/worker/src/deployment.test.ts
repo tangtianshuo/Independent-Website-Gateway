@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { createDockerCandidateAdapter } from './docker.js';
+import type { FinalizeInput } from './operations.js';
 import { test } from 'node:test';
 import { deployCandidate } from './deployment.js';
 
@@ -178,4 +181,31 @@ test('expired attempt restores its own switch token when the database still has 
     assert.equal(calls.includes('restore'), true);
     assert.equal(calls.includes('remove'), true);
   } finally { Date.now = originalNow; }
+});
+
+
+test('records the exact image given to Docker even if a caller supplies a different legacy public identity', async () => {
+  const runtimeImage = { repository: 'local/aeroframe', digest: `sha256:${'b'.repeat(64)}` };
+  const claimedPublicImage = { repository: 'ghcr.io/tangtianshuo/independent-website-templates/fireguard', digest: `sha256:${'a'.repeat(64)}` };
+  const actualClaim = { ...claim, siteId: randomUUID(), workspaceId: randomUUID() };
+  let dockerImage: unknown;
+  let recorded: FinalizeInput | undefined;
+  const adapter = createDockerCandidateAdapter({ request: async request => {
+    if (request.path.startsWith('/containers/create')) dockerImage = request.body?.Image;
+    return { Id: 'candidate-image-identity' };
+  } }, { network: 'gateway-sites', images: [runtimeImage] });
+  const dependencies = {
+    getRepresentativeHost: async () => 'shop.example.test',
+    readRoute: async () => undefined,
+    readDeploymentState: async () => pending,
+    startCandidate: (candidate: { siteId: string; releaseId: string; image: typeof runtimeImage }) => adapter.startCandidate({ ...candidate, workspaceId: actualClaim.workspaceId, credential: 'c'.repeat(64), gatewayUrl: 'http://gateway-control:18183', hostPort: 31001 }),
+    removeCandidate: async () => {}, waitHealthy: async () => true, checkRepresentativeHost: async () => true,
+    applyRoute: async () => {}, verifyRoute: async () => true, restoreRoute: async () => true,
+    finalizeAfterRouteVerification: async (input: FinalizeInput) => { recorded = input; return true; },
+    failPublishOperation: async () => true,
+  };
+  // Reproduce the old optional authority argument at the JavaScript boundary.
+  assert.equal(await Reflect.apply(deployCandidate, undefined, [actualClaim, runtimeImage, dependencies, claimedPublicImage]), true);
+  assert.equal(dockerImage, `local/aeroframe@sha256:${'b'.repeat(64)}`);
+  assert.equal(`${recorded?.imageRepository}@${recorded?.imageDigest}`, dockerImage);
 });

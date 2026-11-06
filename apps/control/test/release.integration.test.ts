@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Pool } from 'pg';
@@ -71,6 +71,18 @@ run('Release PostgreSQL integration', () => {
     expect((await receiveRelease(request('stable', { metadata: { ...metadata, templateVersion: '2.0.0' } }), siteId)).status).toBe(409);
     const row = await pool.query('SELECT "snapshotRef" FROM "Release" WHERE "siteId" = $1 AND "releaseId" = $2', [siteId, 'stable']);
     expect(await readFile(row.rows[0].snapshotRef)).toEqual(snapshot);
+  });
+
+  it('keeps published artifacts private at rest and readable through a runtime file mount, including legacy retries', async () => {
+    expect((await receiveRelease(request('runtime-readable'), siteId)).status).toBe(201);
+    const row = await pool.query('SELECT "snapshotRef" FROM "Release" WHERE "siteId"=$1 AND "releaseId"=$2', [siteId, 'runtime-readable']);
+    const path = row.rows[0].snapshotRef;
+    expect((await stat(directory)).mode & 0o777).toBe(0o700);
+    expect((await stat(path)).mode & 0o777).toBe(0o444);
+    await chmod(path, 0o600);
+    expect((await receiveRelease(request('runtime-readable'), siteId)).status).toBe(200);
+    expect((await stat(path)).mode & 0o777).toBe(0o444);
+    expect(await readFile(path)).toEqual(snapshot);
   });
 
   it('stores only one release for concurrent identical uploads', async () => {

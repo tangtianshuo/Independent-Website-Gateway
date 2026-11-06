@@ -47,7 +47,7 @@ export function createTrafficProxy(statePath: string) {
     const routes = await readRoutes(statePath);
     const route = host ? routes.find(item => item.host === host || item.redirectHosts?.includes(host)) : undefined;
     if (!route) { response.writeHead(404); response.end(); return; }
-    if (route.redirectHosts?.includes(host!)) {
+    if (host !== route.host && route.redirectHosts?.includes(host!)) {
       response.writeHead(301, { location: `https://${route.host}${request.url || '/'}`, 'cache-control': 'no-store' });
       response.end();
       return;
