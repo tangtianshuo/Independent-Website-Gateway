@@ -1,5 +1,7 @@
-import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { validDomainHost } from './domain-challenge.js';
 
 export interface RouteStateEntry {
   siteId: string;
@@ -55,4 +57,28 @@ export async function restoreRouteState(backupPath: string, destinationPath: str
   } finally {
     await rm(temporaryPath, { force: true });
   }
+}
+
+export async function writeDomainState(path: string, hosts: readonly string[]): Promise<void> {
+  if (hosts.some(host => !validDomainHost(host))) throw new Error('Invalid domain state');
+  await mkdir(dirname(path), { recursive: true });
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+  try {
+    const file = await open(temporaryPath, 'wx', 0o600);
+    try { await file.writeFile(JSON.stringify({ hosts: [...new Set(hosts)].sort() })); await file.sync(); }
+    finally { await file.close(); }
+    await rename(temporaryPath, path);
+    if (process.platform !== 'win32') {
+      const directory = await open(dirname(path), 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
+  } finally { await rm(temporaryPath, { force: true }); }
+}
+
+export async function readDomainState(path: string): Promise<ReadonlySet<string>> {
+  try {
+    const value: unknown = JSON.parse(await readFile(path, 'utf8'));
+    if (!value || typeof value !== 'object' || !('hosts' in value) || !Array.isArray(value.hosts) || value.hosts.some(host => typeof host !== 'string' || !validDomainHost(host))) return new Set();
+    return new Set(value.hosts);
+  } catch { return new Set(); }
 }

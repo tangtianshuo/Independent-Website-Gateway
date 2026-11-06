@@ -9,14 +9,14 @@ import { artifactSnapshotPath, ensureArtifactReadable } from '../../../packages/
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const maxRequestBytes = 14 * 1024 * 1024;
 
-export async function receiveRelease(request: Request, routeSiteId: string): Promise<Response> {
+export async function receiveRelease(request: Request, routeSiteId: string, database: Pool = pool): Promise<Response> {
   let client;
   let temporaryPath: string | undefined;
   let finalPath: string | undefined;
   let ownsFinalPath = false;
   let committed = false;
   try {
-    const principal = await authenticateSiteService(request, routeSiteId, pool);
+    const principal = await authenticateSiteService(request, routeSiteId, database);
     const contentLengthHeader = request.headers.get('content-length');
     const contentLength = contentLengthHeader === null ? 0 : Number(contentLengthHeader);
     if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > maxRequestBytes) return Response.json({ error: 'request_too_large' }, { status: 413 });
@@ -37,7 +37,7 @@ export async function receiveRelease(request: Request, routeSiteId: string): Pro
     const raw = Buffer.concat(chunks).toString('utf8');
     const input = validateReleaseInput(JSON.parse(raw), (process.env.ALLOWED_TEMPLATE_IDS ?? '').split(',').filter(Boolean));
     if (input.siteId !== routeSiteId) return Response.json({ error: 'site_not_found' }, { status: 404 });
-    client = await pool.connect();
+    client = await database.connect();
     await client.query('BEGIN');
     const site = await client.query('SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2 FOR UPDATE', [input.siteId, principal.workspaceId]);
     if (!site.rowCount) {

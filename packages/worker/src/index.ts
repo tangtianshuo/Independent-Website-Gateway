@@ -1,11 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Pool } from 'pg';
 import { pathToFileURL } from 'node:url';
 import { artifactSnapshotPath, ensureArtifactReadable } from './artifacts.js';
 import { claimPublishOperation } from './claim.js';
+import { processDomainChange, projectReservedDomains } from './domain-changes.js';
 import { readDomainRoute } from './domain-routing.js';
 import { deployCandidate } from './deployment.js';
 import { createDockerEngineClient } from './docker-client.js';
@@ -89,6 +90,8 @@ export async function runWorker() {
             if (collected.removed || collected.failed) console.info('Container retirement:', JSON.stringify(collected));
           } catch { console.error('Container retirement unavailable; will retry'); }
         }
+        await projectReservedDomains(pool, process.env.GATEWAY_DOMAIN_STATE_PATH ?? join(dirname(process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json'), 'domains.json'));
+        await processDomainChange(pool, router, async route => await inspectRoute(socketPath, route) && await checkCandidate(route.port, route.host, '/'));
         const claim = await claimPublishOperation(pool, workerId, 180);
         if (claim) {
           const selected = await pool.query<{ imageDigest: string; imageRepository: string | null; manifestChecksum: string | null; sourceCommit: string | null; snapshotRef: string | null; checksum: string }>(`

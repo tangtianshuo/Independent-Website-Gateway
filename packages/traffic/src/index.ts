@@ -1,6 +1,9 @@
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { join, dirname } from 'node:path';
+import { readDomainState } from './state.js';
+import { challengePath, challengeResponse } from './domain-challenge.js';
 export { backupRouteState, restoreRouteState } from './state.js';
 
 export interface TrafficRoute {
@@ -34,7 +37,7 @@ async function readRoutes(statePath: string): Promise<TrafficRoute[]> {
   return (parsed as RouteSnapshot).routes.filter(validRoute);
 }
 
-export function createTrafficProxy(statePath: string) {
+export function createTrafficProxy(statePath: string, options: { domainStatePath?: string; secret?: string } = {}) {
   let server: Server | undefined;
   const handler = async (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => {
     if (request.method === 'GET' && request.url === '/healthz') {
@@ -43,7 +46,24 @@ export function createTrafficProxy(statePath: string) {
       response.end(JSON.stringify({ status: 'ok', routeCount: routes.length }));
       return;
     }
-    const host = request.headers.host?.toLowerCase().replace(/:\d+$/, '');
+    const rawHost = request.headers.host || '';
+    const hostHeaders = request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'host');
+    if (hostHeaders.length !== 1 || !/^[A-Za-z0-9.-]+(?::[1-9][0-9]{0,4})?$/.test(rawHost) || (rawHost.includes(':') && Number(rawHost.split(':')[1]) > 65535)) {
+      response.writeHead(400); response.end(); return;
+    }
+    const host = rawHost.toLowerCase().replace(/:\d+$/, '');
+    const url = new URL(request.url || '/', 'http://traffic.invalid');
+    if (url.pathname === challengePath) {
+      response.setHeader('cache-control', 'no-store');
+      if (request.method !== 'GET') { response.writeHead(405); response.end(); return; }
+      const nonces = url.searchParams.getAll('nonce');
+      try {
+        if (nonces.length !== 1) throw new Error('Invalid nonce');
+        const proof = challengeResponse(host || '', nonces[0], await readDomainState(options.domainStatePath || join(dirname(statePath), 'domains.json')), options.secret ?? process.env.STOREFRONT_DOMAIN_SECRET ?? '');
+        response.writeHead(proof ? 200 : 404, { 'content-type': 'text/plain' }); response.end(proof || '');
+      } catch { response.writeHead(400); response.end(); }
+      return;
+    }
     const routes = await readRoutes(statePath);
     const route = host ? routes.find(item => item.host === host || item.redirectHosts?.includes(host)) : undefined;
     if (!route) { response.writeHead(404); response.end(); return; }
@@ -74,7 +94,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const statePath = process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json';
   const port = Number(process.env.GATEWAY_PROXY_PORT ?? 8080);
   if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid traffic proxy port');
-  const proxy = createTrafficProxy(statePath);
+  const proxy = createTrafficProxy(statePath, { domainStatePath: process.env.GATEWAY_DOMAIN_STATE_PATH });
   await proxy.listen(port);
   console.info(`Gateway traffic proxy listening on ${port}`);
   const stop = () => { void proxy.close(); };

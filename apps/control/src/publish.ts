@@ -5,10 +5,10 @@ import { authenticateSiteService, serviceScopeErrorResponse } from './service-sc
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export async function createPublishOperation(request: Request, siteId: string): Promise<Response> {
+export async function createPublishOperation(request: Request, siteId: string, database: Pool = pool): Promise<Response> {
   let principal;
   try {
-    principal = await authenticateSiteService(request, siteId, pool);
+    principal = await authenticateSiteService(request, siteId, database);
   } catch (error) {
     return serviceScopeErrorResponse(error);
   }
@@ -29,10 +29,11 @@ export async function createPublishOperation(request: Request, siteId: string): 
 
   let client;
   try {
-    client = await pool.connect();
+    client = await database.connect();
     await client.query('BEGIN');
     const site = await client.query('SELECT "desiredRevision" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2 FOR UPDATE', [siteId, principal.workspaceId]);
     if (!site.rowCount) return Response.json({ error: 'site_not_found' }, { status: 404 });
+    if ((await client.query(`SELECT 1 FROM "DomainChange" WHERE "siteId"=$1 AND "status"='pending'`, [siteId])).rowCount) return Response.json({ error: 'domain_change_pending' }, { status: 409 });
     const existing = await client.query('SELECT "id", "releaseId", "expectedRevision", "desiredRevision", "status" FROM "PublishOperation" WHERE "siteId" = $1 AND "idempotencyKey" = $2', [siteId, idempotencyKey]);
     if (existing.rowCount) {
       const operation = existing.rows[0];

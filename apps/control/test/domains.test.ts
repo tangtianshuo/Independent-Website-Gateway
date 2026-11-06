@@ -20,6 +20,7 @@ describe('domain state projection', () => {
     process.env.CMS_SERVICE_SECRET = 'test-secret';
     process.env.CMS_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001';
     const query = async (sql: string, values: unknown[]) => {
+      if (sql.includes('FROM "DomainChange"')) return { rowCount: 0, rows: [] };
       expect(values).toEqual(['00000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000001']);
       if (sql === 'SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2') return { rowCount: 1, rows: [{ id: values[0] }] };
       expect(sql).toContain('FROM "Site" site');
@@ -47,10 +48,11 @@ describe('domain state projection', () => {
       '00000000-0000-4000-8000-000000000002', { query } as never);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
+      operation: null, guidance: { entryHost: '', entryIp: '', txtPrefix: '_cms-verify.', challengePath: '/.well-known/cms-domain-challenge' },
       route: { status: 'active', revision: 2, releaseId: 'release-2', host: 'shop.example.com', health: 'healthy' },
       domains: [
-        { id: 'domain-primary', hostname: 'shop.example.com', ownershipStatus: 'verified', dnsStatus: 'ready', certificateStatus: 'ready', enabled: true, role: 'primary', lastCheckedAt: '2026-11-02T08:00:00.000Z', redirectTo: null },
-        { id: 'domain-alias', hostname: 'www.example.com', ownershipStatus: 'verified', dnsStatus: 'ready', certificateStatus: 'ready', enabled: true, role: 'alias', lastCheckedAt: null, redirectTo: 'https://shop.example.com' },
+        { platformOwned: false, lastError: null, id: 'domain-primary', hostname: 'shop.example.com', ownershipStatus: 'verified', dnsStatus: 'ready', certificateStatus: 'ready', enabled: true, role: 'primary', lastCheckedAt: '2026-11-02T08:00:00.000Z', redirectTo: null },
+        { platformOwned: false, lastError: null, id: 'domain-alias', hostname: 'www.example.com', ownershipStatus: 'verified', dnsStatus: 'ready', certificateStatus: 'ready', enabled: true, role: 'alias', lastCheckedAt: null, redirectTo: 'https://shop.example.com' },
       ],
     });
   });

@@ -15,10 +15,11 @@ export async function claimPublishOperation(pool: Pool, workerId: string, leaseS
   if (!workerId || !Number.isSafeInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 3600) throw new Error('Invalid lease');
   const result = await pool.query<ClaimedOperation>(`
     WITH candidate AS (
-      SELECT "id" FROM "PublishOperation"
-      WHERE "status" = 'pending' AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
-      ORDER BY "createdAt", "id"
-      FOR UPDATE SKIP LOCKED
+      SELECT operation."id" FROM "PublishOperation" operation
+      WHERE operation."status" = 'pending' AND (operation."leaseUntil" IS NULL OR operation."leaseUntil" < now())
+        AND NOT EXISTS (SELECT 1 FROM "DomainChange" change WHERE change."siteId"=operation."siteId" AND change."status"='pending')
+      ORDER BY operation."createdAt", operation."id"
+      FOR UPDATE OF operation SKIP LOCKED
       LIMIT 1
     )
     UPDATE "PublishOperation" AS operation
