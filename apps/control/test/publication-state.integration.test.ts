@@ -37,6 +37,9 @@ run('publication state database integration', () => {
   afterAll(async () => {
     vi.unstubAllEnvs();
     await pool.query('DELETE FROM "ActiveDeployment" WHERE "siteId" = $1', [siteId]);
+    await pool.query('DELETE FROM "Deployment" WHERE "siteId" = $1', [siteId]);
+    await pool.query('DELETE FROM "Publication" WHERE "siteId" = $1', [siteId]);
+    await pool.query('DELETE FROM "ReleaseArtifact" WHERE "siteId" = $1', [siteId]);
     await pool.query('DELETE FROM "Release" WHERE "siteId" = $1', [siteId]);
     await pool.query('DELETE FROM "Site" WHERE "id" IN ($1,$2)', [siteId, foreignSiteId]);
     await pool.query('DELETE FROM "Workspace" WHERE "id" IN ($1,$2)', [workspaceId, foreignWorkspaceId]);
@@ -51,13 +54,13 @@ run('publication state database integration', () => {
   it('returns no active state for an unactivated release', async () => {
     const response = await readPublicationState(request(), siteId, pool);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ revision: 9, active: null });
+    expect(await response.json()).toEqual({ revision: 9, status: 'pending', active: null });
   });
   it('joins the active release rather than the newer desired release', async () => {
     await pool.query('INSERT INTO "ActiveDeployment" ("id","siteId","releaseId","imageDigest","routeRevision") VALUES ($1,$2,$3,$4,7)', [randomUUID(), siteId, 'active-release', imageDigest]);
     const response = await readPublicationState(request(), siteId, pool);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ revision: 9, active: {
+    expect(await response.json()).toEqual({ revision: 9, status: 'unknown', active: {
       releaseId: 'active-release', imageDigest, routeRevision: 7, metadata: { imageDigest, templateId: 'aeroframe' },
       snapshot, createdAt: expect.any(String),
     } });

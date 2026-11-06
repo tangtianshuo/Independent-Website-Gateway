@@ -9,7 +9,7 @@ test('collection fences active/previous routes, pending leases, mismatched state
   const schema = `gc_${randomUUID().replaceAll('-', '')}`;
   const admin = new Pool({ connectionString });
   await admin.query(`CREATE SCHEMA "${schema}"`);
-  for (const table of ['Workspace', 'Site', 'Release', 'TemplatePin', 'ActiveDeployment', 'PublishOperation']) {
+  for (const table of ['Workspace', 'Site', 'Release', 'TemplatePin', 'ActiveDeployment', 'PublishOperation', 'Deployment', 'Publication', 'ReleaseArtifact']) {
     await admin.query(`CREATE TABLE "${schema}"."${table}" (LIKE public."${table}" INCLUDING ALL)`);
   }
   const pool = new Pool({ connectionString, options: `-c search_path=${schema},public` });
@@ -64,7 +64,7 @@ test('collection fences active/previous routes, pending leases, mismatched state
     } finally { await writer.query('ROLLBACK'); writer.release(); resume(); }
     assert.equal((await collecting).removed, 1);
   } finally {
-    for (const table of ['ActiveDeployment', 'PublishOperation', 'Release', 'TemplatePin']) await pool.query(`DELETE FROM "${table}" WHERE "siteId" = $1`, [siteId]);
+    for (const table of ['Deployment', 'Publication', 'ReleaseArtifact', 'ActiveDeployment', 'PublishOperation', 'Release', 'TemplatePin']) await pool.query(`DELETE FROM "${table}" WHERE "siteId" = $1`, [siteId]);
     await pool.query('DELETE FROM "Site" WHERE "id" = $1', [siteId]);
     await pool.query('DELETE FROM "Workspace" WHERE "id" = $1', [workspaceId]);
     await pool.end();

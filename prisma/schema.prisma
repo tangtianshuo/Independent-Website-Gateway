@@ -8,45 +8,52 @@ datasource db {
 }
 
 model Workspace {
-  id          String            @id @default(uuid()) @db.Uuid
-  name        String
-  sites       Site[]
-  operations  PublishOperation[]
-  createdAt   DateTime          @default(now()) @db.Timestamptz(6)
-  updatedAt   DateTime          @updatedAt @db.Timestamptz(6)
+  id         String             @id @default(uuid()) @db.Uuid
+  name       String
+  sites      Site[]
+  leads      Lead[]
+  analyticsEvents AnalyticsEvent[]
+  operations PublishOperation[]
+  createdAt  DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime           @updatedAt @db.Timestamptz(6)
 }
 
 model Site {
-  id             String            @id @default(uuid()) @db.Uuid
-  workspaceId    String            @db.Uuid
-  workspace      Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
-  templatePins   TemplatePin[]
-  releases       Release[]
-  domains        Domain[]
-  operations     PublishOperation[]
-  deployments    ActiveDeployment[]
-  desiredRevision Int             @default(0)
-  desiredReleaseId String?
-  credentialHash String?
-  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime          @updatedAt @db.Timestamptz(6)
+  id                String             @id @default(uuid()) @db.Uuid
+  workspaceId       String             @db.Uuid
+  workspace         Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  templatePins      TemplatePin[]
+  releases          Release[]
+  releaseArtifacts  ReleaseArtifact[]
+  domains           Domain[]
+  operations        PublishOperation[]
+  deployments       ActiveDeployment[]
+  deploymentHistory Deployment[]
+  leads             Lead[]
+  analyticsEvents   AnalyticsEvent[]
+  publication       Publication?
+  desiredRevision   Int                @default(0)
+  desiredReleaseId  String?
+  credentialHash    String?
+  createdAt         DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime           @updatedAt @db.Timestamptz(6)
 
   @@unique([workspaceId, id])
   @@index([workspaceId])
 }
 
 model TemplatePin {
-  id          String   @id @default(uuid()) @db.Uuid
-  siteId      String   @db.Uuid
-  site        Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
-  templateId  String
-  version     String
-  imageDigest String
-  imageRepository String?
+  id               String   @id @default(uuid()) @db.Uuid
+  siteId           String   @db.Uuid
+  site             Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  templateId       String
+  version          String
+  imageDigest      String
+  imageRepository  String?
   manifestChecksum String?
-  sourceCommit String?
-  createdAt   DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+  sourceCommit     String?
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
 
   @@unique([siteId, templateId])
 }
@@ -64,35 +71,122 @@ model Release {
   @@unique([siteId, releaseId])
 }
 
+model ReleaseArtifact {
+  id               String       @id @default(uuid()) @db.Uuid
+  siteId           String       @db.Uuid
+  site             Site         @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  releaseId        String
+  deployments      Deployment[]
+  snapshotRef      String?
+  checksum         String
+  assetManifestRef String?
+  rendererDigest   String?
+  status           String       @default("available")
+  createdAt        DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime     @updatedAt @db.Timestamptz(6)
+
+  @@unique([siteId, releaseId])
+  @@index([siteId, status])
+}
+
 model Domain {
+  id                String   @id @default(uuid()) @db.Uuid
+  siteId            String   @db.Uuid
+  site              Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  hostname          String   @unique
+  status            String   @default("pending")
+  ownershipStatus   String   @default("pending")
+  dnsStatus         String   @default("pending")
+  certificateStatus String   @default("pending")
+  enabled           Boolean  @default(true)
+  isPrimary         Boolean  @default(false)
+  lastCheckedAt     DateTime?
+  createdAt         DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(6)
+}
+
+model Lead {
   id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @db.Uuid
   siteId             String   @db.Uuid
-  site               Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
-  hostname           String   @unique
-  status             String   @default("pending")
-  certificateStatus  String   @default("pending")
+  source             String
+  schemaVersion      Int      @default(1)
+  name               String?
+  email              String?
+  phone              String?
+  message            String?
+  fields             Json
+  dedupeKey          String
+  ipHash             String?
+  status             String   @default("new")
+  assignedTo         String?
+  notes              String?
+  notificationStatus String   @default("pending")
+  notificationError  String?
   createdAt          DateTime @default(now()) @db.Timestamptz(6)
   updatedAt          DateTime @updatedAt @db.Timestamptz(6)
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  site               Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@unique([siteId, dedupeKey])
+  @@index([siteId, createdAt])
+  @@index([siteId, status, createdAt])
+}
+
+model AnalyticsEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
+  siteId      String   @db.Uuid
+  eventId     String   @db.Uuid
+  releaseId   String?
+  eventType   String   @default("page_view")
+  path        String
+  referrer    String?
+  device      String?
+  visitorHash String?
+  sessionHash String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  site        Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@index([siteId, createdAt])
+  @@index([siteId, path, createdAt])
+  @@index([siteId, eventType, createdAt])
+  @@unique([siteId, eventId])
+}
+
+model Publication {
+  siteId           String   @id @db.Uuid
+  site             Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  desiredReleaseId String?
+  activeReleaseId  String?
+  desiredRevision  Int      @default(0)
+  routeRevision    Int      @default(0)
+  status           String   @default("pending")
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([status, updatedAt])
 }
 
 model PublishOperation {
-  id             String   @id @default(uuid()) @db.Uuid
-  workspaceId    String   @db.Uuid
-  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
-  siteId         String   @db.Uuid
-  site           Site     @relation(fields: [workspaceId, siteId], references: [workspaceId, id], onDelete: Restrict)
-  idempotencyKey String
-  releaseId      String
-  expectedRevision Int
-  desiredRevision Int
-  status         String   @default("pending")
-  failureCode    String?
-  leaseOwner     String?
-  leaseUntil     DateTime? @db.Timestamptz(6)
-  attempts       Int      @default(0)
+  id                      String    @id @default(uuid()) @db.Uuid
+  workspaceId             String    @db.Uuid
+  workspace               Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  siteId                  String    @db.Uuid
+  site                    Site      @relation(fields: [workspaceId, siteId], references: [workspaceId, id], onDelete: Restrict)
+  idempotencyKey          String
+  releaseId               String
+  expectedRevision        Int
+  desiredRevision         Int
+  status                  String    @default("pending")
+  failureCode             String?
+  leaseOwner              String?
+  leaseUntil              DateTime? @db.Timestamptz(6)
+  attempts                Int       @default(0)
   candidateCredentialHash String?
-  createdAt      DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime @updatedAt @db.Timestamptz(6)
+  createdAt               DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime  @updatedAt @db.Timestamptz(6)
 
   @@unique([siteId, idempotencyKey])
   @@index([siteId, status])
@@ -100,13 +194,30 @@ model PublishOperation {
 }
 
 model ActiveDeployment {
-  id          String   @id @default(uuid()) @db.Uuid
-  siteId      String   @db.Uuid
-  site        Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
-  releaseId   String
-  imageDigest String
-  routeRevision Int    @default(0)
-  activatedAt DateTime @default(now()) @db.Timestamptz(6)
+  id            String   @id @default(uuid()) @db.Uuid
+  siteId        String   @db.Uuid
+  site          Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  releaseId     String
+  imageDigest   String
+  routeRevision Int      @default(0)
+  activatedAt   DateTime @default(now()) @db.Timestamptz(6)
 
   @@unique([siteId])
+}
+
+model Deployment {
+  id            String          @id @default(uuid()) @db.Uuid
+  siteId        String          @db.Uuid
+  site          Site            @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  releaseId     String
+  artifactId    String          @db.Uuid
+  artifact      ReleaseArtifact @relation(fields: [artifactId], references: [id], onDelete: Restrict)
+  imageDigest   String
+  host          String?
+  healthStatus  String          @default("unknown")
+  routeRevision Int             @default(0)
+  activatedAt   DateTime        @default(now()) @db.Timestamptz(6)
+
+  @@index([siteId, activatedAt])
+  @@index([artifactId])
 }

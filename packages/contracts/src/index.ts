@@ -1,5 +1,5 @@
-export { canonicalJson, validateReleaseInput } from './release';
-export type { ReleaseInput } from './release';
+export { canonicalJson, validateContractSnapshotV1, validateReleaseInput } from './release';
+export type { ContractSnapshotV1, ContractTemplateIdentity, ReleaseInput } from './release';
 
 export type HealthStatus = 'ok' | 'ready' | 'not_ready';
 

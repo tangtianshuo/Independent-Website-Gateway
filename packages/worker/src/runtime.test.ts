@@ -18,6 +18,17 @@ function fetchHost(port: number, host: string): Promise<{ status: number; body: 
   });
 }
 
+test('local router redirects aliases to the primary host', async () => {
+  const site = await upstream('published');
+  const router = createLocalRouter();
+  await router.listen(0);
+  try {
+    await router.applyRoute(siteId, 1, site.port, 'site.example.test', 'token', 'container', 'release', ['www.site.example.test']);
+    assert.equal((await fetchHost(router.port(), 'www.site.example.test')).status, 301);
+    assert.equal((await fetchHost(router.port(), 'foreign.example.test')).status, 404);
+  } finally { await router.close(); await site.close(); }
+});
+
 async function upstream(body: string) {
   const server = createServer((_request, response) => { response.end(body); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -212,4 +223,23 @@ test('retirement protection retains the previous route after restart and replace
     await recovered.applyRoute(siteId, 3, target.port, 'site.example.test', 'three', 'third', 'release-3');
     assert.deepEqual(recovered.protectedRoutes().map(route => route.containerId), ['third', 'second']);
   } finally { await target.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+
+test('worker verifies a persisted route without owning the public traffic listener', async () => {
+  let homepageStatus = 503;
+  const target = createServer((_request, response) => { response.writeHead(homepageStatus); response.end(); });
+  await new Promise<void>(resolve => target.listen(0, '127.0.0.1', resolve));
+  const router = createLocalRouter();
+  try {
+    await router.applyRoute(siteId, 1, (target.address() as { port: number }).port, 'site.example.test', 'token');
+    assert.equal(router.port(), 0);
+    assert.equal(await router.verifyRoute(siteId, 1, 'site.example.test'), false);
+    homepageStatus = 301;
+    assert.equal(await router.verifyRoute(siteId, 1, 'site.example.test'), false);
+    homepageStatus = 200;
+    assert.equal(await router.verifyRoute(siteId, 1, 'site.example.test'), true);
+    assert.equal(await router.verifyRoute(siteId, 2, 'site.example.test'), false);
+    assert.equal(await router.verifyRoute(siteId, 1, 'foreign.example.test'), false);
+  } finally { target.closeAllConnections(); await new Promise<void>(resolve => target.close(() => resolve())); }
 });

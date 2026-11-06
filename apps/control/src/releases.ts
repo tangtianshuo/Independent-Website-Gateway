@@ -60,12 +60,23 @@ export async function receiveRelease(request: Request, routeSiteId: string): Pro
       ...input.metadata,
       checksum: createHash('sha256').update(JSON.stringify(input.metadata)).digest('hex'),
     };
-    const existing = await client.query('SELECT "checksum", "metadata" FROM "Release" WHERE "siteId" = $1 AND "releaseId" = $2', [input.siteId, input.releaseId]);
+    const existing = await client.query('SELECT "checksum", "metadata", "snapshotRef" FROM "Release" WHERE "siteId" = $1 AND "releaseId" = $2', [input.siteId, input.releaseId]);
     if (existing.rowCount) {
       if (existing.rows[0].checksum !== input.checksum || canonicalJson(existing.rows[0].metadata) !== canonicalJson(metadata)) {
         await client.query('ROLLBACK');
         return Response.json({ error: 'release_conflict' }, { status: 409 });
       }
+      await client.query(`INSERT INTO "ReleaseArtifact"
+        ("id", "siteId", "releaseId", "snapshotRef", "checksum", "assetManifestRef", "rendererDigest", "status", "updatedAt")
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+        ON CONFLICT ("siteId", "releaseId") DO UPDATE SET
+          "snapshotRef" = COALESCE("ReleaseArtifact"."snapshotRef", EXCLUDED."snapshotRef"),
+          "checksum" = EXCLUDED."checksum",
+          "assetManifestRef" = EXCLUDED."assetManifestRef",
+          "rendererDigest" = EXCLUDED."rendererDigest",
+          "status" = CASE WHEN EXCLUDED."snapshotRef" IS NULL THEN "ReleaseArtifact"."status" ELSE 'available' END,
+          "updatedAt" = now()`, [randomUUID(), input.siteId, input.releaseId, existing.rows[0].snapshotRef, input.checksum,
+        input.metadata.manifestChecksum, input.metadata.imageDigest, existing.rows[0].snapshotRef ? 'available' : 'invalid']);
       await client.query('COMMIT');
       committed = true;
       return Response.json({ siteId: input.siteId, releaseId: input.releaseId, checksum: input.checksum }, { status: 200 });
@@ -81,6 +92,10 @@ export async function receiveRelease(request: Request, routeSiteId: string): Pro
     await link(temporaryPath, finalPath);
     ownsFinalPath = true;
     await client.query('INSERT INTO "Release" ("id", "siteId", "releaseId", "checksum", "metadata", "snapshotRef") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [randomUUID(), input.siteId, input.releaseId, input.checksum, JSON.stringify(metadata), finalPath]);
+    await client.query(`INSERT INTO "ReleaseArtifact"
+      ("id", "siteId", "releaseId", "snapshotRef", "checksum", "assetManifestRef", "rendererDigest", "status", "updatedAt")
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'available', now())`, [randomUUID(), input.siteId, input.releaseId, finalPath,
+      input.checksum, input.metadata.manifestChecksum, input.metadata.imageDigest]);
     await client.query('COMMIT');
     committed = true;
     return Response.json({ siteId: input.siteId, releaseId: input.releaseId, checksum: input.checksum }, { status: 201 });

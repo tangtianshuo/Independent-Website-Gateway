@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { canonicalJson } from '@gateway/contracts';
 
 const owner = 'tangtianshuo';
@@ -116,6 +117,19 @@ async function fetchJson(url: string, stage: RegistryStage): Promise<unknown> {
 export async function loadPublicTemplate(templateId: string, templateVersion: string): Promise<PublicTemplateRecord> {
   let started = Date.now();
   if (!idPattern.test(templateId) || !versionPattern.test(templateVersion)) throw failure('identity', 'invalid_identity', started);
+  const localRegistryFile = process.env.PUBLIC_TEMPLATE_REGISTRY_FILE;
+  if (localRegistryFile) {
+    try {
+      const value = JSON.parse(await readFile(localRegistryFile, 'utf8')) as { records?: unknown };
+      const records = parseRegistryIndex(value);
+      const record = records.find(item => item.id === templateId && item.version === templateVersion);
+      if (!record) throw failure('registry_index', 'template_not_found', started);
+      return record;
+    } catch (error) {
+      if (error instanceof PublicRegistryError) throw error;
+      throw failure('registry_index', 'invalid_index', started);
+    }
+  }
   const commitResponse = await fetchJson(`https://api.github.com/repos/${owner}/${repository}/commits/${registryBranch}`, 'registry_commit') as { sha?: unknown } | null;
   if (!commitResponse || typeof commitResponse.sha !== 'string' || !commitPattern.test(commitResponse.sha)) throw failure('registry_commit', 'invalid_commit', started);
   started = Date.now();

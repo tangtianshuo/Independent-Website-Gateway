@@ -11,7 +11,7 @@ interface RetirementClient {
 const idPattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 interface ContainerInspection {
-  Id?: string; Name?: string; Mounts?: unknown[];
+  Id?: string; Name?: string; Mounts?: Array<{ Type?: string; Source?: string; Destination?: string; Mode?: string; RW?: boolean }>;
   Config?: { Image?: string; User?: string; Env?: string[]; Labels?: Record<string, string> };
   HostConfig?: { NetworkMode?: string; ReadonlyRootfs?: boolean; Privileged?: boolean;
     CapAdd?: string[] | null; CapDrop?: string[]; SecurityOpt?: string[];
@@ -19,6 +19,7 @@ interface ContainerInspection {
     PortBindings?: Record<string, { HostIp?: string; HostPort?: string }[]> };
 }
 const imagePattern = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@)?sha256:[a-f0-9]{64}$/;
+const snapshotSourcePattern = /^\/[A-Za-z0-9._/-]{1,512}$/;
 
 // Separate from the per-attempt create/start client: no arbitrary Docker requests,
 // no pruning of images/networks/volumes, and every removal revalidates ownership.
@@ -63,8 +64,11 @@ export function createRetirementClient(socketPath: string): RetirementClient {
       const env = config?.Env;
       const bindings = host?.PortBindings;
       const ports = bindings?.['3000/tcp'];
+      const mountsValid = Array.isArray(data.Mounts) && (data.Mounts.length === 0 || (data.Mounts.length === 1 &&
+        data.Mounts[0]?.Type === 'bind' && typeof data.Mounts[0].Source === 'string' && snapshotSourcePattern.test(data.Mounts[0].Source) &&
+        data.Mounts[0].Destination === '/var/lib/gateway/artifacts/published.json' && data.Mounts[0].Mode === 'ro' && data.Mounts[0].RW === false));
       if (data.Id !== id || typeof data.Name !== 'string' || !data.Name.startsWith(`/gateway-${identity.siteId}-`) || !uuidPattern.test(data.Name.slice(`/gateway-${identity.siteId}-`.length)) ||
-          !Array.isArray(data.Mounts) || data.Mounts.length !== 0 || config?.Image !== identity.image || config?.User !== '10001:10001' ||
+          !mountsValid || config?.Image !== identity.image || config?.User !== '10001:10001' ||
           config?.Labels?.['gateway.site-id'] !== identity.siteId || config?.Labels?.['gateway.release-id'] !== identity.releaseId ||
           !Array.isArray(env) || ![`SITE_ID=${identity.siteId}`, `RELEASE_ID=${identity.releaseId}`, `NUXT_WORKSPACE_ID=${identity.workspaceId}`, `NUXT_SITE_ID=${identity.siteId}`].every(value => env.includes(value)) ||
           host?.NetworkMode !== 'gateway-sites' || host?.ReadonlyRootfs !== true || host?.Privileged !== false ||
@@ -80,7 +84,7 @@ export function createRetirementClient(socketPath: string): RetirementClient {
   };
 }
 
-export async function collectRetiredContainers(pool: Pool, routes: readonly Route[], docker: RetirementClient) {
+export async function collectRetiredContainers(pool: Pool, routes: readonly Route[], docker: RetirementClient, runtimeImage?: string) {
   const result = { removed: 0, failed: 0 };
   const containers = await docker.list();
   const protectedIds = new Set(routes.map(route => route.containerId));
@@ -115,7 +119,7 @@ export async function collectRetiredContainers(pool: Pool, routes: readonly Rout
         if (!release) continue;
         budget--;
         try {
-          if (await docker.retire(container.Id, { siteId, workspaceId: site.rows[0].workspaceId, releaseId: release.releaseId, image: release.image })) result.removed++;
+          if (await docker.retire(container.Id, { siteId, workspaceId: site.rows[0].workspaceId, releaseId: release.releaseId, image: runtimeImage ?? release.image })) result.removed++;
         } catch { result.failed++; }
       }
       await client.query('COMMIT');

@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
+import { basename, join } from 'node:path';
 import { Pool } from 'pg';
 import { pathToFileURL } from 'node:url';
 import { claimPublishOperation } from './claim.js';
@@ -54,11 +55,12 @@ export async function runWorker() {
   const databaseUrl = process.env.DATABASE_URL;
   const digest = process.env.GATEWAY_APPROVED_IMAGE_DIGEST ?? '';
   const gatewayUrl = process.env.GATEWAY_CONTROL_URL;
-  const proxyPort = Number(process.env.GATEWAY_PROXY_PORT ?? 8080);
   const platform = process.env.GATEWAY_DOCKER_PLATFORM || undefined;
+  const snapshotHostDir = process.env.GATEWAY_SNAPSHOT_HOST_DIR;
+  const localImageDigest = process.env.GATEWAY_LOCAL_IMAGE_DIGEST || '';
+  if (localImageDigest && !digestPattern.test(localImageDigest)) throw new Error('Invalid local image digest');
   if ((platform !== undefined && !['linux/amd64', 'linux/arm64'].includes(platform)) || !databaseUrl || (digest !== '' && !digestPattern.test(digest)) ||
-      !gatewayUrl || !/^http:\/\/host\.docker\.internal:[1-9][0-9]{0,4}$/.test(gatewayUrl) ||
-      !Number.isSafeInteger(proxyPort) || proxyPort < 1024 || proxyPort > 65535) throw new Error('Invalid worker configuration');
+      !gatewayUrl || !/^http:\/\/host\.docker\.internal:[1-9][0-9]{0,4}$/.test(gatewayUrl)) throw new Error('Invalid worker configuration');
   const pool = new Pool({ connectionString: databaseUrl });
   const socketPath = process.env.DOCKER_SOCKET_PATH ?? (process.platform === 'win32' ? '//./pipe/docker_engine' : '/var/run/docker.sock');
   const router = createLocalRouter(process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json', route => inspectRoute(socketPath, route));
@@ -70,30 +72,33 @@ export async function runWorker() {
        JOIN "Site" site ON site."id" = deployment."siteId"`);
     return active.rows;
   }, route => inspectRoute(socketPath, route));
-  await router.listen(proxyPort);
   const retirement = createRetirementClient(socketPath);
+  const retirementImage = localImageDigest ? `local/aeroframe@${localImageDigest}` : undefined;
   let nextCollection = 0;
   let stopping = false;
   const stop = () => { stopping = true; };
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  console.info('Gateway worker started');
   try {
     while (!stopping) {
       try {
         if (Date.now() >= nextCollection) {
           nextCollection = Date.now() + 5000;
           try {
-            const collected = await collectRetiredContainers(pool, router.protectedRoutes(), retirement);
+            const collected = await collectRetiredContainers(pool, router.protectedRoutes(), retirement, retirementImage);
             if (collected.removed || collected.failed) console.info('Container retirement:', JSON.stringify(collected));
           } catch { console.error('Container retirement unavailable; will retry'); }
         }
         const claim = await claimPublishOperation(pool, workerId, 180);
         if (claim) {
-          const selected = await pool.query<{ imageDigest: string; imageRepository: string | null; manifestChecksum: string | null; sourceCommit: string | null }>(`
-            SELECT pin."imageDigest", pin."imageRepository", pin."manifestChecksum", pin."sourceCommit" FROM "Release" release JOIN "TemplatePin" pin
+          const selected = await pool.query<{ imageDigest: string; imageRepository: string | null; manifestChecksum: string | null; sourceCommit: string | null; snapshotRef: string | null }>(`
+            SELECT pin."imageDigest", pin."imageRepository", pin."manifestChecksum", pin."sourceCommit",
+              COALESCE(artifact."snapshotRef", release."snapshotRef") AS "snapshotRef" FROM "Release" release JOIN "TemplatePin" pin
               ON pin."siteId" = release."siteId" AND pin."templateId" = release."metadata"->>'templateId'
               AND pin."version" = release."metadata"->>'templateVersion'
               AND pin."imageDigest" = release."metadata"->>'imageDigest'
-            WHERE release."siteId" = $1 AND release."releaseId" = $2 AND release."snapshotRef" IS NOT NULL
+              LEFT JOIN "ReleaseArtifact" artifact ON artifact."siteId" = release."siteId" AND artifact."releaseId" = release."releaseId"
+            WHERE release."siteId" = $1 AND release."releaseId" = $2 AND COALESCE(artifact."snapshotRef", release."snapshotRef") IS NOT NULL
               AND ((pin."imageRepository" IS NULL AND pin."manifestChecksum" IS NULL AND pin."sourceCommit" IS NULL AND pin."imageDigest" = $3)
                 OR (pin."imageRepository" = 'ghcr.io/tangtianshuo/independent-website-templates/' || pin."templateId"
                   AND pin."manifestChecksum" = release."metadata"->>'manifestChecksum'
@@ -102,12 +107,16 @@ export async function runWorker() {
             await failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' });
             continue;
           }
-          const image = selected.rows[0].imageRepository
+          const publicImage = selected.rows[0].imageRepository
             ? { repository: selected.rows[0].imageRepository, digest: selected.rows[0].imageDigest, sourceCommit: selected.rows[0].sourceCommit ?? undefined, manifestChecksum: selected.rows[0].manifestChecksum ?? undefined }
             : { repository: 'local', digest: selected.rows[0].imageDigest };
+          const localRuntime = Boolean(localImageDigest && publicImage.repository !== 'local');
+          const image = localRuntime
+            ? { repository: 'local/aeroframe', digest: localImageDigest }
+            : publicImage;
           const remainingLeaseMs = claim.leaseUntil.getTime() - Date.now();
           const approvedImages = [image.repository === 'local' ? image.digest : `${image.repository}@${image.digest}`];
-          if (image.repository !== 'local') {
+          if (!localRuntime && image.repository !== 'local') {
             const pullBudgetMs = Math.min(120_000, remainingLeaseMs - 60_000);
             if (pullBudgetMs <= 0) {
               await failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' });
@@ -128,8 +137,12 @@ export async function runWorker() {
           try {
             await deployCandidate(claim, image, {
               getRepresentativeHost: async siteId => {
-                const row = await pool.query<{ hostname: string }>(`SELECT "hostname" FROM "Domain" WHERE "siteId" = $1 AND "status" = 'verified' ORDER BY "hostname" LIMIT 1`, [siteId]);
+                const row = await pool.query<{ hostname: string }>(`SELECT "hostname" FROM "Domain" WHERE "siteId" = $1 AND "enabled" = true AND "ownershipStatus" = 'verified' AND "dnsStatus" = 'ready' AND "certificateStatus" = 'ready' ORDER BY "isPrimary" DESC, "hostname" LIMIT 1`, [siteId]);
                 return row.rows[0]?.hostname ?? '';
+              },
+              getRedirectHosts: async siteId => {
+                const rows = await pool.query<{ hostname: string }>(`SELECT "hostname" FROM "Domain" WHERE "siteId" = $1 AND "enabled" = true AND "isPrimary" = false AND "ownershipStatus" = 'verified' AND "dnsStatus" = 'ready' AND "certificateStatus" = 'ready' ORDER BY "hostname"`, [siteId]);
+                return rows.rows.map(row => row.hostname);
               },
               readRoute: siteId => router.readRoute(siteId),
               readDeploymentState: async operationId => {
@@ -144,7 +157,11 @@ export async function runWorker() {
               },
               startCandidate: async candidate => {
                 candidatePort = await reservePort();
-                const containerId = await adapter.startCandidate({ ...candidate, workspaceId: claim.workspaceId, credential, gatewayUrl, hostPort: candidatePort });
+                const snapshotRef = selected.rows[0].snapshotRef;
+                const hostSnapshotRef = snapshotRef && snapshotHostDir && snapshotRef.startsWith('/var/lib/gateway/snapshots/')
+                  ? join(snapshotHostDir, basename(snapshotRef)) : snapshotRef ?? undefined;
+                const containerId = await adapter.startCandidate({ ...candidate, workspaceId: claim.workspaceId, credential, gatewayUrl, hostPort: candidatePort,
+                  snapshotRef: hostSnapshotRef });
                 containerPorts.set(containerId, candidatePort);
                 return containerId;
               },
@@ -162,12 +179,12 @@ export async function runWorker() {
                 return false;
               },
               checkRepresentativeHost: (containerId, host) => checkCandidate(containerPorts.get(containerId)!, host, '/'),
-              applyRoute: (siteId, revision, containerId, host, token) => router.applyRoute(siteId, revision, containerPorts.get(containerId)!, host, token, containerId, claim.releaseId),
+              applyRoute: (siteId, revision, containerId, host, token, redirectHosts) => router.applyRoute(siteId, revision, containerPorts.get(containerId)!, host, token, containerId, claim.releaseId, redirectHosts),
               verifyRoute: (siteId, revision, host) => router.verifyRoute(siteId, revision, host),
               restoreRoute: (siteId, token, previous) => router.restoreRoute(siteId, token, previous),
               finalizeAfterRouteVerification: input => finalizeAfterRouteVerification(pool, input),
               failPublishOperation: input => failPublishOperation(pool, input),
-            });
+            }, publicImage);
           } catch (error) { console.error('Publish operation failed:', error instanceof Error ? error.message : 'unknown'); }
         } else await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (error) {
@@ -175,7 +192,7 @@ export async function runWorker() {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
-  } finally { await router.close(); await pool.end(); }
+  } finally { await pool.end(); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

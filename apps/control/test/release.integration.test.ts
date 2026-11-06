@@ -45,6 +45,9 @@ run('Release PostgreSQL integration', () => {
   });
 
   afterAll(async () => {
+    await pool.query('DELETE FROM "Deployment" WHERE "siteId" = $1', [siteId]);
+    await pool.query('DELETE FROM "Publication" WHERE "siteId" = $1', [siteId]);
+    await pool.query('DELETE FROM "ReleaseArtifact" WHERE "siteId" = $1', [siteId]);
     await pool.query('DELETE FROM "Release" WHERE "siteId" = $1', [siteId]);
     await pool.query('DELETE FROM "Site" WHERE "id" = $1', [siteId]);
     await pool.query('DELETE FROM "Workspace" WHERE "id" IN ($1, $2)', [workspaceId, otherWorkspaceId]);

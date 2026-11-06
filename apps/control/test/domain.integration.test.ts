@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { reserveDomain as ReserveHandler } from '../src/domains';
+import type { readDomainState as ReadDomainStateHandler, reserveDomain as ReserveHandler } from '../src/domains';
 
 const connectionString = process.env.GATEWAY_TEST_DATABASE_URL;
 const run = connectionString ? describe : describe.skip;
@@ -13,6 +13,7 @@ run('domain PostgreSQL integration', () => {
   const siteId = randomUUID();
   const otherSiteId = randomUUID();
   let reserveDomain: typeof ReserveHandler;
+  let readDomainState: typeof ReadDomainStateHandler;
 
   function request(hostname: string, site = siteId, extra: Record<string, unknown> = {}) {
     return new Request(`http://localhost/api/v1/sites/${site}/domains`, {
@@ -26,7 +27,7 @@ run('domain PostgreSQL integration', () => {
     process.env.DATABASE_URL = connectionString;
     process.env.CMS_SERVICE_SECRET = 'domain-secret';
     process.env.CMS_WORKSPACE_ID = workspaceId;
-    ({ reserveDomain } = await import('../src/domains'));
+    ({ readDomainState, reserveDomain } = await import('../src/domains'));
     await pool.query('INSERT INTO "Workspace" ("id", "name", "updatedAt") VALUES ($1, $2, now()), ($3, $4, now())', [workspaceId, 'owner', otherWorkspaceId, 'other']);
     await pool.query('INSERT INTO "Site" ("id", "workspaceId", "updatedAt") VALUES ($1, $2, now()), ($3, $4, now())', [siteId, workspaceId, otherSiteId, otherWorkspaceId]);
   });
@@ -51,6 +52,11 @@ run('domain PostgreSQL integration', () => {
     expect(row.rows[0]).toMatchObject({ siteId, hostname: 'xn--bcher-kva.example', status: 'pending', certificateStatus: 'pending' });
     expect((await reserveDomain(request('XN--BCHER-KVA.EXAMPLE'), siteId)).status).toBe(409);
     expect((await reserveDomain(request('bücher.example', otherSiteId), otherSiteId)).status).toBe(404);
+    const state = await readDomainState(new Request(`http://localhost/api/v1/sites/${siteId}/domains`, { headers: { authorization: 'Bearer domain-secret' } }), siteId);
+    expect(state.status).toBe(200);
+    const body = await state.json() as { route: unknown; domains: Array<{ hostname: string; role: string }> };
+    expect(body.route).toMatchObject({ status: 'unrouted', revision: 0, releaseId: null, host: null });
+    expect(body.domains.some(domain => domain.hostname === 'xn--bcher-kva.example' && domain.role === 'alias')).toBe(true);
   });
 
   it('lets the database constraint resolve concurrent reservations across sites', async () => {

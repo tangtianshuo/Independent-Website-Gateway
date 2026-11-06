@@ -33,6 +33,12 @@ test('retirement re-inspects exact owned stateless container before deleting wit
     assert.deepEqual(removed, [`/containers/${id}?force=true`]);
   });
 });
+test('retirement accepts the immutable published snapshot bind mount', async () => {
+  await engine({ ...container(), Mounts: [{ Type: 'bind', Source: '/var/lib/gateway/snapshots/release.snapshot', Destination: '/var/lib/gateway/artifacts/published.json', Mode: 'ro', RW: false }] }, async (client, removed) => {
+    assert.equal(await client.retire(id, identity), true);
+    assert.deepEqual(removed, [`/containers/${id}?force=true`]);
+  });
+});
 test('retirement refuses foreign, mounted, privileged, writable and unexpected image containers', async () => {
   const unsafe = [
     { ...container(), Id: 'c'.repeat(64) },

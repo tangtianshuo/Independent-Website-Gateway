@@ -2,7 +2,7 @@ import { createServer, request as httpRequest, type Server } from 'node:http';
 import { open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-export interface Route { siteId: string; revision: number; port: number; host: string; token: string; containerId?: string; releaseId?: string }
+export interface Route { siteId: string; revision: number; port: number; host: string; redirectHosts?: string[]; token: string; containerId?: string; releaseId?: string }
 const hostPattern = /^(?=.{1,253}$)[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$/;
 const containerPattern = /^[a-zA-Z0-9_-]{1,128}$/;
 
@@ -22,7 +22,7 @@ export function checkCandidate(port: number, host: string, path = '/healthz'): P
 function validRoute(route: Route): boolean {
   return !!route && typeof route.siteId === 'string' && !!route.siteId && Number.isSafeInteger(route.revision) && route.revision >= 0 &&
     Number.isSafeInteger(route.port) && route.port >= 1024 && route.port <= 65535 &&
-    typeof route.host === 'string' && hostPattern.test(route.host) && typeof route.token === 'string' && !!route.token &&
+    typeof route.host === 'string' && hostPattern.test(route.host) && (route.redirectHosts === undefined || (Array.isArray(route.redirectHosts) && route.redirectHosts.every(host => hostPattern.test(host)))) && typeof route.token === 'string' && !!route.token &&
     typeof route.containerId === 'string' && containerPattern.test(route.containerId) &&
     typeof route.releaseId === 'string' && !!route.releaseId;
 }
@@ -46,9 +46,14 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
   }
   const server: Server = createServer((request, response) => {
     const host = request.headers.host?.toLowerCase().replace(/:\d+$/, '');
-    const route = host && [...routes.values()].find(item => item.host === host);
+    const route = host && [...routes.values()].find(item => item.host === host || item.redirectHosts?.includes(host));
     if (!route) { response.writeHead(404); response.end(); return; }
     void (async () => {
+      if (route.redirectHosts?.includes(host!)) {
+        response.writeHead(301, { location: `https://${route.host}${request.url || '/'}`, 'cache-control': 'no-store' });
+        response.end();
+        return;
+      }
       if (validateTarget && !await validateTarget(route)) { response.writeHead(502); response.end(); return; }
       const upstream = httpRequest({ hostname: '127.0.0.1', port: route.port, path: request.url, method: request.method,
         headers: { ...request.headers, host: route.host }, timeout: 10000 }, result => {
@@ -65,8 +70,8 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
     close() { server.closeAllConnections(); return new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); },
     protectedRoutes(): Route[] { return [...routes.values(), ...previous.values()].map(route => ({ ...route })); },
     readRoute(siteId: string): Promise<Route | undefined> { return Promise.resolve(routes.get(siteId)); },
-    async applyRoute(siteId: string, revision: number, port: number, host: string, token: string, containerId?: string, releaseId?: string) {
-      const route = { siteId, revision, port, host, token, containerId, releaseId };
+    async applyRoute(siteId: string, revision: number, port: number, host: string, token: string, containerId?: string, releaseId?: string, redirectHosts?: string[]) {
+      const route = { siteId, revision, port, host, token, containerId, releaseId, ...(redirectHosts?.length ? { redirectHosts } : {}) };
       if (!hostPattern.test(host) || !Number.isSafeInteger(port) || port < 1024 || port > 65535 ||
           (statePath && !validRoute(route))) throw new Error('Invalid route');
       const next = new Map(routes);
@@ -82,7 +87,7 @@ export function createLocalRouter(statePath?: string, validateTarget?: (route: R
     async verifyRoute(siteId: string, revision: number, host: string) {
       const route = routes.get(siteId);
       return !!route && route.revision === revision && route.host === host &&
-        (!validateTarget || await validateTarget(route)) && await checkCandidate(this.port(), host, '/');
+        (!validateTarget || await validateTarget(route)) && await checkCandidate(this.port() || route.port, host, '/');
     },
     async restoreRoute(siteId: string, token: string, old: Route | undefined) {
       if (routes.get(siteId)?.token !== token) return false;

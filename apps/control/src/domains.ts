@@ -7,6 +7,10 @@ import { authenticateService } from './auth';
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function json(body: unknown, status = 200): Response {
+  return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+}
+
 export function normalizeHostname(hostname: string): string {
   if (!hostname || hostname !== hostname.trim() || /[\s/:*?#@\\]/u.test(hostname)) throw new Error('Invalid hostname');
   const ascii = domainToASCII(hostname.endsWith('.') ? hostname.slice(0, -1) : hostname).toLowerCase();
@@ -40,10 +44,58 @@ export async function reserveDomain(request: Request, siteId: string): Promise<R
   try {
     const site = await pool.query('SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2', [siteId, principal.workspaceId]);
     if (!site.rowCount) return Response.json({ error: 'site_not_found' }, { status: 404 });
-    const result = await pool.query('INSERT INTO "Domain" ("id", "siteId", "hostname", "updatedAt") VALUES ($1, $2, $3, now()) RETURNING "id", "siteId", "hostname", "status", "certificateStatus"', [randomUUID(), siteId, hostname]);
+    const result = await pool.query('INSERT INTO "Domain" ("id", "siteId", "hostname", "updatedAt") VALUES ($1, $2, $3, now()) RETURNING "id", "siteId", "hostname", "status", "ownershipStatus", "dnsStatus", "certificateStatus", "enabled", "isPrimary"', [randomUUID(), siteId, hostname]);
     return Response.json(result.rows[0], { status: 201 });
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && error.code === '23505') return Response.json({ error: 'domain_conflict' }, { status: 409 });
     return Response.json({ error: 'domain_unavailable' }, { status: 503 });
+  }
+}
+
+export async function readDomainState(request: Request, siteId: string, database: Pick<Pool, 'query'> = pool): Promise<Response> {
+  let principal;
+  try {
+    principal = authenticateService(request.headers.get('authorization') ?? undefined, {
+      secret: process.env.CMS_SERVICE_SECRET ?? '',
+      workspaceId: process.env.CMS_WORKSPACE_ID ?? '',
+    });
+  } catch {
+    return json({ error: 'unauthorized' }, 401);
+  }
+  if (!uuid.test(siteId) || !uuid.test(principal.workspaceId)) return json({ error: 'invalid_request' }, 400);
+
+  try {
+    const result = await database.query<{
+      id: string | null; hostname: string | null; ownershipStatus: string | null; dnsStatus: string | null;
+      certificateStatus: string | null; enabled: boolean | null; isPrimary: boolean | null; lastCheckedAt: Date | string | null;
+      publicationStatus: string | null; activeReleaseId: string | null; routeRevision: number | null; routeHost: string | null;
+      deploymentHealthStatus: string | null;
+    }>(`SELECT domain."id", domain."hostname", domain."ownershipStatus", domain."dnsStatus", domain."certificateStatus",
+        domain."enabled", domain."isPrimary", domain."lastCheckedAt", publication."status" AS "publicationStatus",
+        COALESCE(publication."activeReleaseId", active."releaseId") AS "activeReleaseId",
+        COALESCE(publication."routeRevision", deployment."routeRevision", active."routeRevision") AS "routeRevision",
+        deployment."host" AS "routeHost", deployment."healthStatus" AS "deploymentHealthStatus"
+      FROM "Site" site
+      LEFT JOIN "Domain" domain ON domain."siteId" = site."id"
+      LEFT JOIN "Publication" publication ON publication."siteId" = site."id"
+      LEFT JOIN "ActiveDeployment" active ON active."siteId" = site."id"
+      LEFT JOIN "Deployment" deployment ON deployment."id" = active."id"
+      WHERE site."id" = $1 AND site."workspaceId" = $2
+      ORDER BY domain."createdAt" ASC NULLS LAST`, [siteId, principal.workspaceId]);
+    if (!result.rowCount) return json({ error: 'site_not_found' }, 404);
+    const first = result.rows[0];
+    const routeRevision = first.routeRevision ?? 0;
+    const routeStatus = first.activeReleaseId && first.routeHost ? (first.publicationStatus === 'active' ? 'active' : first.publicationStatus || 'pending') : 'unrouted';
+    const route = { status: routeStatus, revision: routeRevision, releaseId: first.activeReleaseId, host: first.routeHost, health: first.deploymentHealthStatus || 'unknown' };
+    const primaryHost = result.rows.find(row => row.isPrimary && row.hostname)?.hostname || first.routeHost || null;
+    const domains = result.rows.filter(row => row.id && row.hostname).map(row => ({
+      id: row.id!, hostname: row.hostname!, ownershipStatus: row.ownershipStatus || 'pending', dnsStatus: row.dnsStatus || 'pending',
+      certificateStatus: row.certificateStatus || 'pending', enabled: row.enabled !== false, role: row.isPrimary ? 'primary' : 'alias',
+      lastCheckedAt: row.lastCheckedAt instanceof Date ? row.lastCheckedAt.toISOString() : row.lastCheckedAt || null,
+      redirectTo: row.isPrimary || !primaryHost ? null : `https://${primaryHost}`,
+    }));
+    return json({ route, domains });
+  } catch {
+    return json({ error: 'domain_state_unavailable' }, 503);
   }
 }

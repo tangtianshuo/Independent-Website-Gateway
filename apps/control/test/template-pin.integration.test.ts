@@ -66,7 +66,7 @@ run('public template pin PostgreSQL integration', () => {
   });
   afterAll(async () => {
     vi.unstubAllGlobals();
-    for (const table of ['ActiveDeployment', 'PublishOperation', 'Release', 'TemplatePin']) await pool.query(`DELETE FROM "${table}" WHERE "siteId" IN ($1,$2)`, [siteId, foreignSiteId]);
+    for (const table of ['Deployment', 'Publication', 'ReleaseArtifact', 'ActiveDeployment', 'PublishOperation', 'Release', 'TemplatePin']) await pool.query(`DELETE FROM "${table}" WHERE "siteId" IN ($1,$2)`, [siteId, foreignSiteId]);
     await pool.query('DELETE FROM "Site" WHERE "id" IN ($1,$2)', [siteId, foreignSiteId]);
     await pool.query('DELETE FROM "Workspace" WHERE "id" IN ($1,$2)', [workspaceId, foreignWorkspaceId]);
     await pool.end();

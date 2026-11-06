@@ -49,6 +49,12 @@ export async function createPublishOperation(request: Request, siteId: string): 
     const desiredRevision = (expectedRevision as number) + 1;
     const created = await client.query('INSERT INTO "PublishOperation" ("id", "workspaceId", "siteId", "idempotencyKey", "releaseId", "expectedRevision", "desiredRevision", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, now()) RETURNING "id", "releaseId", "expectedRevision", "desiredRevision", "status"', [id, principal.workspaceId, siteId, idempotencyKey, releaseId, expectedRevision, desiredRevision]);
     await client.query('UPDATE "Site" SET "desiredRevision" = $1, "desiredReleaseId" = $2, "updatedAt" = now() WHERE "id" = $3', [desiredRevision, releaseId, siteId]);
+    await client.query(`INSERT INTO "Publication"
+      ("siteId", "desiredReleaseId", "desiredRevision", "status", "updatedAt")
+      VALUES ($1, $2, $3, 'pending', now())
+      ON CONFLICT ("siteId") DO UPDATE SET "desiredReleaseId" = EXCLUDED."desiredReleaseId",
+        "desiredRevision" = EXCLUDED."desiredRevision", "status" = 'pending', "updatedAt" = now()`,
+      [siteId, releaseId, desiredRevision]);
     await client.query('COMMIT');
     return Response.json(created.rows[0], { status: 201 });
   } catch {

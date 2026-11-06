@@ -1,0 +1,12 @@
+{
+  "name": "@gateway/traffic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/*.test.js",
+    "start": "node dist/index.js"
+  }
+}

@@ -63,6 +63,15 @@ test('creates and starts an approved immutable candidate with fixed isolation', 
   });
 });
 
+test('mounts the immutable published artifact into the runtime when available', async () => {
+  const docker = client();
+  const adapter = createDockerCandidateAdapter(docker, config);
+  await adapter.startCandidate({ siteId, releaseId, image, ...runtime, snapshotRef: '/var/lib/gateway/snapshots/release.snapshot' });
+  const body = docker.requests[0].body!;
+  assert.ok((body.Env as string[]).includes('PUBLISHED_SNAPSHOT_PATH=/var/lib/gateway/artifacts/published.json'));
+  assert.deepEqual((body.HostConfig as Record<string, unknown>).Binds, ['/var/lib/gateway/snapshots/release.snapshot:/var/lib/gateway/artifacts/published.json:ro']);
+});
+
 test('rejects valid-looking but unapproved repository and digest pairs before Docker calls', async () => {
   const docker = client();
   const adapter = createDockerCandidateAdapter(docker, config);

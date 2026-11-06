@@ -23,6 +23,9 @@ before(async () => {
 after(async () => {
   if (!pool) return;
   await pool.query('DELETE FROM "ActiveDeployment" WHERE "siteId" IN ($1, $2)', [siteId, otherSiteId]);
+  await pool.query('DELETE FROM "Deployment" WHERE "siteId" IN ($1, $2)', [siteId, otherSiteId]);
+  await pool.query('DELETE FROM "Publication" WHERE "siteId" IN ($1, $2)', [siteId, otherSiteId]);
+  await pool.query('DELETE FROM "ReleaseArtifact" WHERE "siteId" IN ($1, $2)', [siteId, otherSiteId]);
   await pool.query('DELETE FROM "PublishOperation" WHERE "siteId" IN ($1, $2)', [siteId, otherSiteId]);
   await pool.query('DELETE FROM "Release" WHERE "siteId" IN ($1, $2)', [siteId, otherSiteId]);
   await pool.query('DELETE FROM "TemplatePin" WHERE "siteId" IN ($1, $2)', [siteId, otherSiteId]);
@@ -220,7 +223,7 @@ test('public finalization rejects every changed or NULL pin field and preserves 
     assert.equal((await pool!.query('SELECT "status" FROM "PublishOperation" WHERE "id"=$1', [publicOperation])).rows[0].status, 'ready');
     assert.equal((await pool!.query('SELECT "releaseId" FROM "ActiveDeployment" WHERE "siteId"=$1', [publicSite])).rows[0].releaseId, 'public-release');
   } finally {
-    for (const table of ['ActiveDeployment', 'PublishOperation', 'Release', 'TemplatePin']) await pool!.query(`DELETE FROM "${table}" WHERE "siteId"=$1`, [publicSite]);
+    for (const table of ['Deployment', 'Publication', 'ReleaseArtifact', 'ActiveDeployment', 'PublishOperation', 'Release', 'TemplatePin']) await pool!.query(`DELETE FROM "${table}" WHERE "siteId"=$1`, [publicSite]);
     await pool!.query('DELETE FROM "Site" WHERE "id"=$1', [publicSite]);
   }
 });

@@ -38,7 +38,7 @@ function setup() {
       route = previous; routeToken = null; return true;
     },
     finalizeAfterRouteVerification: async (input: unknown) => {
-      assert.deepEqual(input, { operationId: claim.id, workerId: claim.leaseOwner, attempts: claim.attempts, leaseUntil: claim.leaseUntil, imageDigest: image.digest, imageRepository: image.repository });
+      assert.deepEqual(input, { operationId: claim.id, workerId: claim.leaseOwner, attempts: claim.attempts, leaseUntil: claim.leaseUntil, imageDigest: image.digest, host: 'shop.example.com', imageRepository: image.repository });
       calls.push('finalize'); return true;
     },
     failPublishOperation: async (input: { failureCode: string }) => { calls.push(`fail:${input.failureCode}`); return true; },

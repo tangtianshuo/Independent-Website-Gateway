@@ -8,6 +8,7 @@ const releasePattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$/;
 const networkPattern = /^gateway-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const containerIdPattern = /^[a-zA-Z0-9_-]{1,128}$/;
 const createPathPattern = /^\/containers\/create\?name=(gateway-[a-zA-Z0-9_-]{1,120})$/;
+const snapshotBindPattern = /^\/[A-Za-z0-9._/-]{1,512}:\/var\/lib\/gateway\/artifacts\/published\.json:ro$/;
 
 function fields(value: unknown, expected: string[]): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -42,7 +43,7 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
   const values = fields(body, ['Env', 'HostConfig', 'Image', 'Labels', 'User']);
   if (!values) return undefined;
   const { Image, User, Env, Labels, HostConfig } = values;
-  const env = arrayValues(Env, 6);
+  const env = arrayValues(Env, Array.isArray(Env) && Env.length === 7 ? 7 : 6);
   if (typeof Image !== 'string' || !imagePattern.test(Image) || !approvedImages.has(Image) || User !== '10001:10001' || !env ||
       typeof env[0] !== 'string' || !env[0].startsWith('SITE_ID=') || !uuidPattern.test(env[0].slice(8)) ||
       typeof env[1] !== 'string' || !env[1].startsWith('RELEASE_ID=') || !releasePattern.test(env[1].slice(11)) ||
@@ -50,10 +51,13 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
       env[3] !== `NUXT_SITE_ID=${env[0].slice(8)}` ||
       typeof env[4] !== 'string' || !/^NUXT_GATEWAY_URL=http:\/\/(?:host\.docker\.internal|gateway-control):[1-9][0-9]{0,4}$/.test(env[4]) ||
       Number(new URL(env[4].slice(17)).port) > 65535 ||
-      typeof env[5] !== 'string' || !/^NUXT_SITE_CREDENTIAL=[a-f0-9]{64}$/.test(env[5])) return undefined;
+      typeof env[5] !== 'string' || !/^NUXT_SITE_CREDENTIAL=[a-f0-9]{64}$/.test(env[5]) ||
+      env.length === 7 && (env[6] !== 'PUBLISHED_SNAPSHOT_PATH=/var/lib/gateway/artifacts/published.json')) return undefined;
   const labels = fields(Labels, ['gateway.release-id', 'gateway.site-id']);
   if (!labels || labels['gateway.site-id'] !== env[0].slice(8) || labels['gateway.release-id'] !== env[1].slice(11)) return undefined;
-  const host = fields(HostConfig, ['CapDrop', 'Memory', 'NanoCpus', 'NetworkMode', 'PidsLimit', 'PortBindings', 'Privileged', 'ReadonlyRootfs', 'SecurityOpt']);
+  const hasBinds = !!HostConfig && typeof HostConfig === 'object' && Object.hasOwn(HostConfig, 'Binds');
+  const hostKeys = hasBinds ? ['Binds', 'CapDrop', 'Memory', 'NanoCpus', 'NetworkMode', 'PidsLimit', 'PortBindings', 'Privileged', 'ReadonlyRootfs', 'SecurityOpt'] : ['CapDrop', 'Memory', 'NanoCpus', 'NetworkMode', 'PidsLimit', 'PortBindings', 'Privileged', 'ReadonlyRootfs', 'SecurityOpt'];
+  const host = fields(HostConfig, hostKeys);
   if (!host || typeof host.NetworkMode !== 'string' || !networkPattern.test(host.NetworkMode) ||
       host.ReadonlyRootfs !== true || host.Privileged !== false ||
       arrayValues(host.CapDrop, 1)?.[0] !== 'ALL' ||
@@ -64,6 +68,10 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
   const port = ports && fields(ports[0], ['HostIp', 'HostPort']);
   if (!port || port.HostIp !== '127.0.0.1' || typeof port.HostPort !== 'string' ||
       !/^[1-9][0-9]{3,4}$/.test(port.HostPort) || Number(port.HostPort) < 1024 || Number(port.HostPort) > 65535) return undefined;
+  if (env.length === 7) {
+    const binds = arrayValues(host.Binds, 1);
+    if (!binds || typeof binds[0] !== 'string' || !snapshotBindPattern.test(binds[0])) return undefined;
+  } else if (hasBinds) return undefined;
   return jsonObject({
     Image, User: '10001:10001', Env: jsonArray(env as string[]),
     Labels: jsonObject({ 'gateway.site-id': labels['gateway.site-id'], 'gateway.release-id': labels['gateway.release-id'] }),
@@ -72,6 +80,7 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
       CapDrop: jsonArray(['ALL']), SecurityOpt: jsonArray(['no-new-privileges:true']),
       Memory: 512 * 1024 * 1024, NanoCpus: 500_000_000, PidsLimit: 128,
       PortBindings: jsonObject({ '3000/tcp': jsonArray([jsonObject({ HostIp: '127.0.0.1', HostPort: port.HostPort })]) }),
+      ...(env.length === 7 ? { Binds: jsonArray([String((host.Binds as unknown[])[0])]) } : {}),
     }),
   });
 }

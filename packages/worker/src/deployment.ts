@@ -21,13 +21,14 @@ export interface DeploymentState {
 // The Host and route snapshot must come from trusted worker-side domain/route state, never request input.
 export interface DeploymentDependencies<Route> {
   getRepresentativeHost(siteId: string): Promise<string>;
+  getRedirectHosts?(siteId: string): Promise<string[]>;
   readRoute(siteId: string): Promise<Route>;
   readDeploymentState(operationId: string): Promise<DeploymentState | null>;
   startCandidate(candidate: { siteId: string; releaseId: string; image: ImageIdentity }): Promise<string>;
   removeCandidate(containerId: string): Promise<void>;
   waitHealthy(containerId: string): Promise<boolean>;
   checkRepresentativeHost(containerId: string, host: string): Promise<boolean>;
-  applyRoute(siteId: string, revision: number, containerId: string, host: string, switchToken: string): Promise<void>;
+  applyRoute(siteId: string, revision: number, containerId: string, host: string, switchToken: string, redirectHosts?: string[]): Promise<void>;
   verifyRoute(siteId: string, revision: number, host: string): Promise<boolean>;
   // Adapter must atomically compare the current route's switch token and restore only on equality.
   restoreRoute(siteId: string, expectedSwitchToken: string, previous: Route): Promise<boolean>;
@@ -36,7 +37,7 @@ export interface DeploymentDependencies<Route> {
 }
 
 export async function deployCandidate<Route>(
-  claim: ClaimedOperation, image: ImageIdentity, dependencies: DeploymentDependencies<Route>,
+  claim: ClaimedOperation, image: ImageIdentity, dependencies: DeploymentDependencies<Route>, publicImage: ImageIdentity = image,
 ): Promise<boolean> {
   let previous: Route | undefined;
   let containerId: string | undefined;
@@ -67,17 +68,18 @@ export async function deployCandidate<Route>(
     requireLeaseBudget();
     failureCode = 'ROUTE_SWITCH_FAILED';
     routeAttempted = true;
-    await dependencies.applyRoute(claim.siteId, claim.desiredRevision, containerId, host, switchToken);
+    const redirectHosts = dependencies.getRedirectHosts ? await dependencies.getRedirectHosts(claim.siteId) : undefined;
+    await dependencies.applyRoute(claim.siteId, claim.desiredRevision, containerId, host, switchToken, redirectHosts);
     if (!await dependencies.verifyRoute(claim.siteId, claim.desiredRevision, host)) throw new Error('Route verification failed');
     failureCode = 'WORKER_INTERNAL_ERROR';
-    const pinIdentity = image.repository === 'local' ? {} : {
-      imageRepository: image.repository,
-      ...(image.sourceCommit ? { sourceCommit: image.sourceCommit } : {}),
-      ...(image.manifestChecksum ? { manifestChecksum: image.manifestChecksum } : {}),
+    const pinIdentity = publicImage.repository === 'local' ? {} : {
+      imageRepository: publicImage.repository,
+      ...(publicImage.sourceCommit ? { sourceCommit: publicImage.sourceCommit } : {}),
+      ...(publicImage.manifestChecksum ? { manifestChecksum: publicImage.manifestChecksum } : {}),
     };
     const finalized = await dependencies.finalizeAfterRouteVerification({
       operationId: claim.id, workerId: claim.leaseOwner, attempts: claim.attempts,
-      leaseUntil: claim.leaseUntil, imageDigest: image.digest,
+      leaseUntil: claim.leaseUntil, imageDigest: publicImage.digest, host,
       ...pinIdentity,
     });
     if (!finalized) throw new Error('Deployment finalize rejected');

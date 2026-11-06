@@ -70,6 +70,19 @@ describe('publication state', () => {
       releaseId: 'live-release', imageDigest, routeRevision: 7, metadata, snapshot, createdAt: '2026-10-27T10:00:00.000Z',
     } });
   });
+  it('returns Gateway publication status and artifact identity when the new state model is present', async () => {
+    row = { ...row, publicationStatus: 'active', artifactId: 'artifact-1', artifactChecksum: checksum(JSON.stringify(snapshot)),
+      assetManifestRef: metadata.manifestChecksum, rendererDigest: metadata.imageDigest, artifactStatus: 'available' };
+    const response = await readPublicationState(request(), siteId, pool());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ revision: 9, status: 'active', active: {
+      releaseId: 'live-release', imageDigest, routeRevision: 7, metadata, snapshot,
+      createdAt: '2026-10-27T10:00:00.000Z', artifact: {
+        id: 'artifact-1', checksum: checksum(JSON.stringify(snapshot)), assetManifestRef: metadata.manifestChecksum,
+        rendererDigest: metadata.imageDigest, status: 'available',
+      },
+    } });
+  });
   it('verifies the checksum over original bytes instead of normalized JSON', async () => {
     await writeFile(path, JSON.stringify(snapshot, null, 2));
     const response = await readPublicationState(request(), siteId, pool());

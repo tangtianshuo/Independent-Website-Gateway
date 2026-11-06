@@ -17,22 +17,29 @@ export async function readPublishedRelease(request: Request, siteId: string, poo
   try {
     const result = requestedRelease === null
       ? await pool.query<{ workspaceId: string; credentialHash: string | null; releaseId: string | null; checksum: string | null; snapshotRef: string | null }>(`
-        SELECT site."workspaceId", site."credentialHash", active."releaseId", saved."checksum", saved."snapshotRef"
-        FROM "Site" site LEFT JOIN "ActiveDeployment" active ON active."siteId" = site."id"
-        LEFT JOIN "Release" saved ON saved."siteId" = site."id" AND saved."releaseId" = active."releaseId"
+        SELECT site."workspaceId", site."credentialHash", COALESCE(publication."activeReleaseId", active."releaseId") AS "releaseId",
+          COALESCE(artifact."checksum", saved."checksum") AS "checksum", COALESCE(artifact."snapshotRef", saved."snapshotRef") AS "snapshotRef"
+        FROM "Site" site
+        LEFT JOIN "Publication" publication ON publication."siteId" = site."id"
+        LEFT JOIN "ActiveDeployment" active ON active."siteId" = site."id"
+        LEFT JOIN "Release" saved ON saved."siteId" = site."id" AND saved."releaseId" = COALESCE(publication."activeReleaseId", active."releaseId")
+        LEFT JOIN "ReleaseArtifact" artifact ON artifact."siteId" = site."id" AND artifact."releaseId" = COALESCE(publication."activeReleaseId", active."releaseId")
         WHERE site."id" = $1`, [siteId])
       : await pool.query<{ workspaceId: string; credentialHash: string | null; releaseId: string | null; checksum: string | null; snapshotRef: string | null }>(`
-        SELECT site."workspaceId", operation."candidateCredentialHash" AS "credentialHash", saved."releaseId", saved."checksum", saved."snapshotRef"
+        SELECT site."workspaceId", operation."candidateCredentialHash" AS "credentialHash", saved."releaseId",
+          COALESCE(artifact."checksum", saved."checksum") AS "checksum", COALESCE(artifact."snapshotRef", saved."snapshotRef") AS "snapshotRef"
         FROM "Site" site JOIN "PublishOperation" operation ON operation."siteId" = site."id"
           AND operation."workspaceId" = site."workspaceId" AND operation."releaseId" = $2
           AND operation."status" = 'pending' AND operation."leaseOwner" IS NOT NULL
           AND operation."leaseUntil" > clock_timestamp() AND operation."candidateCredentialHash" IS NOT NULL
         JOIN "Release" saved ON saved."siteId" = site."id" AND saved."releaseId" = operation."releaseId"
+        LEFT JOIN "ReleaseArtifact" artifact ON artifact."siteId" = site."id" AND artifact."releaseId" = operation."releaseId"
         WHERE site."id" = $1
         UNION ALL
-        SELECT site."workspaceId", site."credentialHash", saved."releaseId", saved."checksum", saved."snapshotRef"
+        SELECT site."workspaceId", site."credentialHash", saved."releaseId", COALESCE(artifact."checksum", saved."checksum"), COALESCE(artifact."snapshotRef", saved."snapshotRef")
         FROM "Site" site JOIN "ActiveDeployment" active ON active."siteId" = site."id" AND active."releaseId" = $2
         JOIN "Release" saved ON saved."siteId" = site."id" AND saved."releaseId" = active."releaseId"
+        LEFT JOIN "ReleaseArtifact" artifact ON artifact."siteId" = site."id" AND artifact."releaseId" = active."releaseId"
         WHERE site."id" = $1`, [siteId, requestedRelease]);
     const tokenHash = Buffer.from(sha256(token), 'hex');
     const row = result.rows.find(item => item.credentialHash && /^[a-f0-9]{64}$/.test(item.credentialHash)
