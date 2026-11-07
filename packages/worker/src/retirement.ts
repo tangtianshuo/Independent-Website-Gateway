@@ -1,10 +1,12 @@
 import { request as httpRequest } from 'node:http';
 import type { Pool } from 'pg';
 import type { Route } from './runtime.js';
+import { runtimeOwnership } from './runtime-scope.js';
 
 interface OwnedIdentity { siteId: string; workspaceId: string; releaseId: string; image: string }
 interface ListedContainer { Id: string; Labels: Record<string, string> }
 interface RetirementClient {
+  readonly runtimeScope?: string;
   list(): Promise<ListedContainer[]>;
   retire(id: string, identity: OwnedIdentity): Promise<boolean>;
 }
@@ -23,7 +25,8 @@ const snapshotSourcePattern = /^\/[A-Za-z0-9._/-]{1,512}$/;
 
 // Separate from the per-attempt create/start client: no arbitrary Docker requests,
 // no pruning of images/networks/volumes, and every removal revalidates ownership.
-export function createRetirementClient(socketPath: string): RetirementClient {
+export function createRetirementClient(socketPath: string, runtimeScope?: string): RetirementClient {
+  const ownership = runtimeOwnership(runtimeScope);
   function send(method: 'GET' | 'DELETE', path: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const request = httpRequest({ socketPath, method, path }, response => {
@@ -49,10 +52,11 @@ export function createRetirementClient(socketPath: string): RetirementClient {
     });
   }
   return {
+    runtimeScope,
     async list() {
-      const data = await send('GET', `/containers/json?all=true&filters=${encodeURIComponent(JSON.stringify({ label: ['gateway.site-id', 'gateway.release-id'] }))}`);
+      const data = await send('GET', `/containers/json?all=true&filters=${encodeURIComponent(JSON.stringify({ label: ownership.filters }))}`);
       if (!Array.isArray(data) || data.some(item => !item || !idPattern.test(item.Id) || !item.Labels || typeof item.Labels !== 'object')) throw new Error('Invalid Docker retirement listing');
-      return data;
+      return data.filter(item => ownership.matches(item.Labels));
     },
     async retire(id, identity) {
       if (!idPattern.test(id)) throw new Error('Invalid container identity');
@@ -69,7 +73,7 @@ export function createRetirementClient(socketPath: string): RetirementClient {
         data.Mounts[0].Destination === '/var/lib/gateway/artifacts/published.json' && data.Mounts[0].Mode === 'ro' && data.Mounts[0].RW === false));
       if (data.Id !== id || typeof data.Name !== 'string' || !data.Name.startsWith(`/gateway-${identity.siteId}-`) || !uuidPattern.test(data.Name.slice(`/gateway-${identity.siteId}-`.length)) ||
           !mountsValid || config?.Image !== identity.image || config?.User !== '10001:10001' ||
-          config?.Labels?.['gateway.site-id'] !== identity.siteId || config?.Labels?.['gateway.release-id'] !== identity.releaseId ||
+          !ownership.matches(config?.Labels) || config?.Labels?.[ownership.siteKey] !== identity.siteId || config?.Labels?.[ownership.releaseKey] !== identity.releaseId ||
           !Array.isArray(env) || ![`SITE_ID=${identity.siteId}`, `RELEASE_ID=${identity.releaseId}`, `NUXT_WORKSPACE_ID=${identity.workspaceId}`, `NUXT_SITE_ID=${identity.siteId}`].every(value => env.includes(value)) ||
           host?.NetworkMode !== 'gateway-sites' || host?.ReadonlyRootfs !== true || host?.Privileged !== false ||
           (host?.CapAdd != null && (!Array.isArray(host.CapAdd) || host.CapAdd.length !== 0)) ||
@@ -86,9 +90,10 @@ export function createRetirementClient(socketPath: string): RetirementClient {
 
 export async function collectRetiredContainers(pool: Pool, routes: readonly Route[], docker: RetirementClient) {
   const result = { removed: 0, failed: 0 };
-  const containers = await docker.list();
+  const ownership = runtimeOwnership(docker.runtimeScope);
+  const containers = (await docker.list()).filter(item => ownership.matches(item.Labels));
   const protectedIds = new Set(routes.map(route => route.containerId));
-  const siteIds = [...new Set(containers.map(item => item.Labels['gateway.site-id']).filter(id => uuidPattern.test(id)))];
+  const siteIds = [...new Set(containers.map(item => item.Labels[ownership.siteKey]).filter(id => uuidPattern.test(id)))];
   let budget = 10; // Bound Docker work per sweep; residuals are discovered next time.
   for (const siteId of siteIds) {
     if (budget <= 0) break;
@@ -114,8 +119,8 @@ export async function collectRetiredContainers(pool: Pool, routes: readonly Rout
         WHERE release."siteId" = $1 AND release."snapshotRef" IS NOT NULL`, [siteId]);
       for (const container of containers) {
         if (budget <= 0) break;
-        if (container.Labels['gateway.site-id'] !== siteId || protectedIds.has(container.Id)) continue;
-        const release = releases.rows.find(row => row.releaseId === container.Labels['gateway.release-id']);
+        if (container.Labels[ownership.siteKey] !== siteId || protectedIds.has(container.Id)) continue;
+        const release = releases.rows.find(row => row.releaseId === container.Labels[ownership.releaseKey]);
         if (!release) continue;
         budget--;
         try {

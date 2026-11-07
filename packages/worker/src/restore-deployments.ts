@@ -7,9 +7,10 @@ import { pathToFileURL } from 'node:url';
 import { Pool, type PoolClient } from 'pg';
 import type { RouteStateEntry, RouteStateSnapshot } from '../../traffic/dist/state.js';
 import { createDockerEngineClient } from './docker-client.js';
-import { createDockerCandidateAdapter } from './docker.js';
+import { createDockerCandidateAdapter, validatePublicIngestOrigin } from './docker.js';
 import { artifactSnapshotPath, ensureArtifactReadable } from './artifacts.js';
 import { checkCandidate } from './runtime.js';
+import { requireDatabaseRuntimeScope, runtimeOwnership } from './runtime-scope.js';
 
 type Active = { siteId: string; releaseId: string; routeRevision: number; host: string };
 export async function rebuildRoutes(saved: RouteStateSnapshot, active: Active[], rebuild: (deployment: Active, prior: RouteStateEntry) => Promise<RouteStateEntry>): Promise<RouteStateSnapshot> {
@@ -34,9 +35,17 @@ async function freePort(excluded: Set<number>): Promise<number> {
   }
 }
 
+export function restoreRuntimeConfig(receipt: { runtimeScope?: string }, env: NodeJS.ProcessEnv = process.env) {
+  if (!receipt.runtimeScope || env.GATEWAY_RUNTIME_SCOPE !== receipt.runtimeScope) throw new Error('isolated_restore_scope_required');
+  runtimeOwnership(receipt.runtimeScope);
+  if (env.NUXT_PUBLIC_INGEST_ORIGIN === undefined) throw new Error('explicit_restore_intake_origin_required');
+  return { runtimeScope: receipt.runtimeScope, ingestOrigin: validatePublicIngestOrigin(env.NUXT_PUBLIC_INGEST_ORIGIN) };
+}
+
 export async function restoreDeployments(root: string): Promise<{count:number}> {
   root=resolve(root);
   const receipt=JSON.parse(await readFile(join(root,'restore-private.json'),'utf8'));
+  const runtimeConfig=restoreRuntimeConfig(receipt);
   const url=new URL(process.env.DATABASE_URL || '');
   if (url.pathname.slice(1)!==receipt.postgresDatabase || !/^platform_restore_[a-f0-9]{24}$/.test(receipt.postgresDatabase) || receipt.status!=='databases-restored') throw new Error('isolated_restore_receipt_required');
   const lockBytes=await readFile(join(root,'platform-lock.json'));
@@ -47,9 +56,10 @@ export async function restoreDeployments(root: string): Promise<{count:number}> 
   const pool=new Pool({connectionString:url.href});
   let client: PoolClient | undefined;
   const created:string[]=[];
-  const docker=createDockerEngineClient({socketPath:process.env.DOCKER_SOCKET_PATH,approvedImages:[]});
+  const candidateEngines=new Map<string,ReturnType<typeof createDockerEngineClient>>();
   let committed=false, commitAttempted=false;
   try {
+    await requireDatabaseRuntimeScope(pool,runtimeConfig.runtimeScope);
     client=await pool.connect();
     const connection=client;
     await connection.query('BEGIN');
@@ -78,12 +88,13 @@ export async function restoreDeployments(root: string): Promise<{count:number}> 
       if (!local && (receipt.evidenceType!=='platform-lock-bound' || !locked || !/^[a-z][a-z0-9-]*$/.test(row.metadata.templateId))) throw new Error('formal_renderer_identity_required');
       const image={repository:local?'local':`ghcr.io/tangtianshuo/independent-website-templates/${row.metadata.templateId}`,digest:row.imageDigest};
       const imageRef=local?image.digest:`${image.repository}@${image.digest}`;
-      const engine=createDockerEngineClient({socketPath:process.env.DOCKER_SOCKET_PATH,approvedImages:[imageRef]});
+      const engine=createDockerEngineClient({socketPath:process.env.DOCKER_SOCKET_PATH,approvedImages:[imageRef],runtimeScope:runtimeConfig.runtimeScope});
       if (!local) await engine.pull(imageRef);
-      const adapter=createDockerCandidateAdapter(engine,{network:process.env.GATEWAY_RESTORE_NETWORK || 'gateway-sites',images:[image]});
+      const adapter=createDockerCandidateAdapter(engine,{network:'gateway-sites',images:[image],...runtimeConfig});
       const port=await freePort(excluded),credential=randomBytes(32).toString('hex');
       const id=await adapter.startCandidate({siteId:item.siteId,releaseId:item.releaseId,image,workspaceId:row.workspaceId,credential,gatewayUrl:process.env.GATEWAY_CONTROL_URL!,hostPort:port,snapshotRef:artifactSnapshotPath(join(root,'artifacts'),item.siteId,item.releaseId)});
       created.push(id);
+      candidateEngines.set(id,engine);
       await writeFile(join(root,'reconstruction-resources.json'),JSON.stringify({containers:created}),{mode:0o600});
       let healthy=false;
       for(let i=0;i<45;i++) { if(await checkCandidate(port,'localhost') && await checkCandidate(port,item.host,'/')) {healthy=true;break;} await new Promise(r=>setTimeout(r,1000)); }
@@ -106,7 +117,7 @@ export async function restoreDeployments(root: string): Promise<{count:number}> 
     await client?.query('ROLLBACK').catch(()=>undefined);
     const residual:string[]=[];
     if(!commitAttempted) for(const id of created) {
-      try { await docker.request({method:'DELETE',path:`/containers/${id}?force=true`}); } catch { residual.push(id); }
+      try { await candidateEngines.get(id)!.request({method:'DELETE',path:`/containers/${id}?force=true`}); } catch { residual.push(id); }
     }
     // If SQL committed, leave owned instances and the pending route file for operator inspection.
     await writeFile(join(root,'reconstruction-failure.json'),JSON.stringify({committed,commitAttempted,containers:created,residual}),{mode:0o600});

@@ -1,7 +1,8 @@
 import { request as httpRequest } from 'node:http';
+import { runtimeOwnership } from './runtime-scope.js';
 
 interface DockerRequest { method: 'POST' | 'DELETE'; path: string; body?: Record<string, unknown> }
-interface DockerEngineOptions { socketPath?: string; timeoutMs?: number; maxResponseBytes?: number; approvedImages?: readonly string[]; platform?: string }
+interface DockerEngineOptions { socketPath?: string; timeoutMs?: number; maxResponseBytes?: number; approvedImages?: readonly string[]; platform?: string; runtimeScope?: string }
 const imagePattern = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@)?sha256:[a-f0-9]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const releasePattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$/;
@@ -50,7 +51,7 @@ function validIngestEnvironment(value: unknown): boolean {
   } catch { return false; }
 }
 
-function validCreateBody(body: Record<string, unknown> | undefined, approvedImages: ReadonlySet<string>): Record<string, unknown> | undefined {
+function validCreateBody(body: Record<string, unknown> | undefined, approvedImages: ReadonlySet<string>, ownership: ReturnType<typeof runtimeOwnership>): Record<string, unknown> | undefined {
   const values = fields(body, ['Env', 'HostConfig', 'Image', 'Labels', 'User']);
   if (!values) return undefined;
   const { Image, User, Env, Labels, HostConfig } = values;
@@ -65,8 +66,8 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
       typeof env[5] !== 'string' || !/^NUXT_SITE_CREDENTIAL=[a-f0-9]{64}$/.test(env[5]) ||
       !validIngestEnvironment(env[6]) ||
       env.length === 8 && (env[7] !== 'PUBLISHED_SNAPSHOT_PATH=/var/lib/gateway/artifacts/published.json')) return undefined;
-  const labels = fields(Labels, ['gateway.release-id', 'gateway.site-id']);
-  if (!labels || labels['gateway.site-id'] !== env[0].slice(8) || labels['gateway.release-id'] !== env[1].slice(11)) return undefined;
+  const labels = fields(Labels, ownership.keys);
+  if (!labels || !ownership.matches(labels) || labels[ownership.siteKey] !== env[0].slice(8) || labels[ownership.releaseKey] !== env[1].slice(11)) return undefined;
   const hasBinds = !!HostConfig && typeof HostConfig === 'object' && Object.hasOwn(HostConfig, 'Binds');
   const hostKeys = hasBinds ? ['Binds', 'CapDrop', 'Memory', 'NanoCpus', 'NetworkMode', 'PidsLimit', 'PortBindings', 'Privileged', 'ReadonlyRootfs', 'SecurityOpt'] : ['CapDrop', 'Memory', 'NanoCpus', 'NetworkMode', 'PidsLimit', 'PortBindings', 'Privileged', 'ReadonlyRootfs', 'SecurityOpt'];
   const host = fields(HostConfig, hostKeys);
@@ -86,7 +87,7 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
   } else if (hasBinds) return undefined;
   return jsonObject({
     Image, User: '10001:10001', Env: jsonArray(env as string[]),
-    Labels: jsonObject({ 'gateway.site-id': labels['gateway.site-id'], 'gateway.release-id': labels['gateway.release-id'] }),
+    Labels: jsonObject(ownership.labels(env[0].slice(8), env[1].slice(11))),
     HostConfig: jsonObject({
       NetworkMode: host.NetworkMode, ReadonlyRootfs: true, Privileged: false,
       CapDrop: jsonArray(['ALL']), SecurityOpt: jsonArray(['no-new-privileges:true']),
@@ -98,12 +99,13 @@ function validCreateBody(body: Record<string, unknown> | undefined, approvedImag
 }
 
 export function createDockerEngineClient({
-  socketPath = '/var/run/docker.sock', timeoutMs = 10_000, maxResponseBytes = 1024 * 1024, approvedImages = [], platform,
+  socketPath = '/var/run/docker.sock', timeoutMs = 10_000, maxResponseBytes = 1024 * 1024, approvedImages = [], platform, runtimeScope,
 }: DockerEngineOptions = {}) {
   if (!socketPath || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
       !Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1 ||
       (platform !== undefined && !['linux/amd64', 'linux/arm64'].includes(platform)) ||
       approvedImages.some(image => !imagePattern.test(image))) throw new Error('Invalid Docker Engine configuration');
+  const ownership = runtimeOwnership(runtimeScope);
   const platformQuery = platform ? `&platform=${encodeURIComponent(platform)}` : '';
   const allowed = new Set(approvedImages);
   const candidates = new Set<string>();
@@ -177,7 +179,7 @@ export function createDockerEngineClient({
       const requestBody = input.body;
       let payload: string | undefined;
       if (method === 'POST' && createPathPattern.test(path)) {
-        const body = validCreateBody(requestBody, allowed);
+        const body = validCreateBody(requestBody, allowed, ownership);
         if (!body) return Promise.reject(new Error('Invalid Docker request'));
         payload = JSON.stringify(body);
       } else {

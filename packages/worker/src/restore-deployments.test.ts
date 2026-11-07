@@ -55,3 +55,15 @@ test('duplicate source routes cannot conceal a regressing first route',async()=>
   await assert.rejects(restoreRouteState(source,target),/Invalid route state/);
  } finally {await rm(dir,{recursive:true,force:true});}
 });
+
+test('reconstruction requires receipt-bound scope and explicitly configured intake before Docker', async () => {
+  const { restoreRuntimeConfig } = await import('./restore-deployments.js');
+  const runtimeScope = 'restore-' + 'a'.repeat(24);
+  const receipt = { runtimeScope };
+  assert.throws(() => restoreRuntimeConfig(receipt, {}), /scope_required/);
+  assert.throws(() => restoreRuntimeConfig(receipt, { GATEWAY_RUNTIME_SCOPE: runtimeScope }), /intake_origin_required/);
+  for (const origin of ['http://external.example', 'https://intake.example/path', 'https://user:secret@intake.example']) {
+    assert.throws(() => restoreRuntimeConfig(receipt, { GATEWAY_RUNTIME_SCOPE: runtimeScope, NUXT_PUBLIC_INGEST_ORIGIN: origin }), /intake origin/);
+  }
+  assert.deepEqual(restoreRuntimeConfig(receipt, { GATEWAY_RUNTIME_SCOPE: runtimeScope, NUXT_PUBLIC_INGEST_ORIGIN: 'http://127.0.0.1:12345' }), { runtimeScope, ingestOrigin: 'http://127.0.0.1:12345' });
+});

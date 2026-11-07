@@ -253,3 +253,33 @@ test('strict engine rejects unknown duplicate and unsafe public intake environme
   });
   assert.equal(requests, 0);
 });
+
+test('recovery adapter crosses the engine boundary with disjoint scoped labels and intake origin', async () => {
+  const runtimeScope = 'restore-' + 'a'.repeat(24);
+  const received: Record<string, unknown>[] = [];
+  await withEngine((request, response) => {
+    let bytes = '';
+    request.on('data', chunk => { bytes += chunk; });
+    request.on('end', () => {
+      if (bytes) received.push(JSON.parse(bytes));
+      response.writeHead(request.url?.includes('/create?') ? 201 : 204);
+      response.end(request.url?.includes('/create?') ? '{"Id":"recovery-candidate"}' : '');
+    });
+  }, async path => {
+    const engine = clientFor(path, { runtimeScope });
+    const identity = { repository: image.split('@')[0], digest: image.split('@')[1] };
+    const adapter = createDockerCandidateAdapter(engine, { network: 'gateway-sites', images: [identity], runtimeScope, ingestOrigin: 'http://127.0.0.1:12345' } as never);
+    await adapter.startCandidate({ siteId, releaseId: 'release-1', image: identity, workspaceId, credential: 'a'.repeat(64), gatewayUrl: 'http://host.docker.internal:3000', hostPort: 49152 });
+  });
+  assert.deepEqual(received[0].Labels, { 'gateway.restore.site-id': siteId, 'gateway.restore.release-id': 'release-1', 'gateway.runtime-scope': runtimeScope });
+  assert.ok((received[0].Env as string[]).includes('NUXT_PUBLIC_INGEST_ORIGIN=http://127.0.0.1:12345'));
+});
+
+test('scoped engine refuses ordinary, mixed and foreign scope label payloads before socket', async () => {
+  const runtimeScope = 'restore-' + 'a'.repeat(24);
+  const client = clientFor('/missing-owned-test.sock', { runtimeScope });
+  for (const Labels of [createBody.Labels,
+    { 'gateway.restore.site-id': siteId, 'gateway.restore.release-id': 'release-1', 'gateway.runtime-scope': 'restore-' + 'b'.repeat(24) },
+    { ...createBody.Labels, 'gateway.restore.site-id': siteId, 'gateway.restore.release-id': 'release-1', 'gateway.runtime-scope': runtimeScope },
+  ]) await assert.rejects(client.request({ method: 'POST', path: createPath, body: { ...createBody, Labels } }), /Invalid Docker request/);
+});

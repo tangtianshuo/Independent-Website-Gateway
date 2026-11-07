@@ -76,3 +76,34 @@ test('listing is limited to Gateway labels and rejects malformed ownership recor
     await assert.rejects(client.list(), /Invalid Docker retirement listing/);
   });
 });
+
+test('source and recovery retirement use disjoint listing filters and reinspection ownership', async () => {
+  const scope = 'restore-' + 'a'.repeat(24);
+  const ordinary = container();
+  const recovery = { ...ordinary, Config: { ...ordinary.Config, Labels: { 'gateway.restore.site-id': siteId, 'gateway.restore.release-id': 'old', 'gateway.runtime-scope': scope } } };
+  let inspection: unknown = ordinary;
+  const removed: string[] = [], filters: string[][] = [];
+  const server = createServer((req, res) => {
+    if (req.method === 'DELETE') { removed.push(req.url!); res.writeHead(204); res.end(); }
+    else if (req.url!.startsWith('/containers/json?')) {
+      filters.push(JSON.parse(new URL(req.url!, 'http://localhost').searchParams.get('filters')!).label);
+      // Hostile/stale listing still must not authorize foreign deletion.
+      res.end(JSON.stringify([ordinary, recovery].map(c => ({ Id: c.Id, Labels: c.Config.Labels }))));
+    } else res.end(JSON.stringify(inspection));
+  });
+  const path = `/tmp/retire-scope-${randomUUID()}.sock`;
+  await new Promise<void>(resolve => server.listen(path, resolve));
+  try {
+    const source = createRetirementClient(path), restored = createRetirementClient(path, scope);
+    assert.equal((await source.list()).length, 1); assert.equal((await restored.list()).length, 1);
+    assert.deepEqual(filters, [['gateway.site-id', 'gateway.release-id'], ['gateway.restore.site-id', 'gateway.restore.release-id', `gateway.runtime-scope=${scope}`]]);
+    assert.equal(await restored.retire(id, identity), false);
+    inspection = recovery;
+    assert.equal(await source.retire(id, identity), false);
+    assert.equal(await restored.retire(id, identity), true);
+    inspection = { ...recovery, Config: { ...recovery.Config, Labels: { ...recovery.Config.Labels, ...ordinary.Config.Labels } } };
+    assert.equal(await restored.retire(id, identity), false);
+    assert.equal(await source.retire(id, identity), false);
+    assert.equal(removed.length, 1);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});

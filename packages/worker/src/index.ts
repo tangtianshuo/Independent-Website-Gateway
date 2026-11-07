@@ -16,6 +16,8 @@ import { pullApprovedImage } from './pull.js';
 import { failPublishOperation, finalizeAfterRouteVerification, persistCandidateCredential } from './operations.js';
 import { checkCandidate, createLocalRouter, type Route } from './runtime.js';
 
+import { requireDatabaseRuntimeScope, runtimeOwnership } from './runtime-scope.js';
+
 export const workerStatus = 'running' as const;
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 
@@ -28,7 +30,8 @@ async function reservePort(): Promise<number> {
   return port;
 }
 
-function inspectRoute(socketPath: string, route: Route): Promise<boolean> {
+export function inspectRoute(socketPath: string, route: Route, runtimeScope?: string): Promise<boolean> {
+  const ownership = runtimeOwnership(runtimeScope);
   if (!route.containerId || !/^[a-zA-Z0-9_-]{1,128}$/.test(route.containerId)) return Promise.resolve(false);
   return new Promise(resolve => {
     const request = httpRequest({ socketPath, path: `/containers/${route.containerId}/json`, method: 'GET', timeout: 3000 }, response => {
@@ -41,8 +44,9 @@ function inspectRoute(socketPath: string, route: Route): Promise<boolean> {
           const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           const binding = data.NetworkSettings?.Ports?.['3000/tcp'];
           resolve(data.Id === route.containerId && data.State?.Running === true &&
-            data.Config?.Labels?.['gateway.site-id'] === route.siteId &&
-            data.Config?.Labels?.['gateway.release-id'] === route.releaseId &&
+            ownership.matches(data.Config?.Labels) &&
+            data.Config?.Labels?.[ownership.siteKey] === route.siteId &&
+            data.Config?.Labels?.[ownership.releaseKey] === route.releaseId &&
             Array.isArray(binding) && binding.length === 1 && binding[0].HostIp === '127.0.0.1' &&
             binding[0].HostPort === String(route.port));
         } catch { resolve(false); }
@@ -64,8 +68,11 @@ export async function runWorker() {
   if ((platform !== undefined && !['linux/amd64', 'linux/arm64'].includes(platform)) || !databaseUrl || (digest !== '' && !digestPattern.test(digest)) ||
       !gatewayUrl || !/^http:\/\/host\.docker\.internal:[1-9][0-9]{0,4}$/.test(gatewayUrl)) throw new Error('Invalid worker configuration');
   const pool = new Pool({ connectionString: databaseUrl });
+  let runtimeScope: string | undefined;
+  try { runtimeScope = await requireDatabaseRuntimeScope(pool, process.env.GATEWAY_RUNTIME_SCOPE); }
+  catch (error) { await pool.end(); throw error; }
   const socketPath = process.env.DOCKER_SOCKET_PATH ?? (process.platform === 'win32' ? '//./pipe/docker_engine' : '/var/run/docker.sock');
-  const router = createLocalRouter(process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json', route => inspectRoute(socketPath, route));
+  const router = createLocalRouter(process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json', route => inspectRoute(socketPath, route, runtimeScope));
   const workerId = randomUUID();
   await pool.query('SELECT 1');
   await router.recover(async () => {
@@ -74,8 +81,8 @@ export async function runWorker() {
        LEFT JOIN "Deployment" deployment ON deployment."id" = active."id"
        JOIN "Site" site ON site."id" = active."siteId"`);
     return active.rows;
-  }, route => inspectRoute(socketPath, route));
-  const retirement = createRetirementClient(socketPath);
+  }, route => inspectRoute(socketPath, route, runtimeScope));
+  const retirement = createRetirementClient(socketPath, runtimeScope);
   let nextCollection = 0;
   let stopping = false;
   const stop = () => { stopping = true; };
@@ -92,7 +99,7 @@ export async function runWorker() {
           } catch { console.error('Container retirement unavailable; will retry'); }
         }
         await projectReservedDomains(pool, process.env.GATEWAY_DOMAIN_STATE_PATH ?? join(dirname(process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json'), 'domains.json'));
-        const claim = await scheduleWorkerOperations(pool, router, workerId, async route => await inspectRoute(socketPath, route) && await checkCandidate(route.port, route.host, '/'));
+        const claim = await scheduleWorkerOperations(pool, router, workerId, async route => await inspectRoute(socketPath, route, runtimeScope) && await checkCandidate(route.port, route.host, '/'));
         if (claim) {
           const selected = await pool.query<{ imageDigest: string; imageRepository: string | null; manifestChecksum: string | null; sourceCommit: string | null; snapshotRef: string | null; checksum: string }>(`
             SELECT pin."imageDigest", pin."imageRepository", pin."manifestChecksum", pin."sourceCommit",
@@ -121,14 +128,14 @@ export async function runWorker() {
               await failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' });
               continue;
             }
-            const pullDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: pullBudgetMs, approvedImages });
+            const pullDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: pullBudgetMs, approvedImages, runtimeScope });
             if (!await pullApprovedImage(
               () => pullDocker.pull(`${image.repository}@${image.digest}`),
               () => failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' }),
             )) continue;
           }
-          const claimDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: Math.min(15_000, Math.max(1, claim.leaseUntil.getTime() - Date.now() - 10_000)), approvedImages });
-          const adapter = createDockerCandidateAdapter(claimDocker, { network: 'gateway-sites', images: [image], ingestOrigin });
+          const claimDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: Math.min(15_000, Math.max(1, claim.leaseUntil.getTime() - Date.now() - 10_000)), approvedImages, runtimeScope });
+          const adapter = createDockerCandidateAdapter(claimDocker, { network: 'gateway-sites', images: [image], ingestOrigin, runtimeScope });
           const credential = randomBytes(32).toString('hex');
           if (!await persistCandidateCredential(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, credential })) continue;
           let candidatePort = 0;
