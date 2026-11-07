@@ -52,7 +52,7 @@ jobs:
 
   candidate:
     needs: verify
-    if: needs.verify.outputs.publish == 'true'
+    if: needs.verify.outputs.candidate == 'true'
     runs-on: ubuntu-latest
     environment: production
     concurrency:
