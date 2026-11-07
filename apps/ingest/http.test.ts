@@ -73,6 +73,29 @@ run('independent public intake HTTP', () => {
       0,
     );
   });
+  it('accepts C4 ready origins only after publication and retains ownership, TLS and enabled checks', async () => {
+    const id = randomUUID();
+    await pool.query(`INSERT INTO "Domain" ("id","siteId","hostname","status","ownershipStatus","dnsStatus","certificateStatus","enabled","updatedAt") VALUES ($1,$2,'ready.example','ready','verified','ready','ready',true,now())`, [id, siteId]);
+    const send = () => handler(request('events', { eventId: randomUUID(), path: '/ready' }, { origin: 'https://ready.example' }));
+    try {
+      expect((await send()).status).toBe(403);
+      await pool.query(`INSERT INTO "ActiveDeployment" ("id","siteId","releaseId","imageDigest","routeRevision") VALUES ($1,$2,'ready-release',$3,1)`, [randomUUID(),siteId,'sha256:'+'a'.repeat(64)]);
+      expect((await send()).status).toBe(202);
+      expect((await handler(request('leads', {source:'contact',email:'ready@example.test',message:'ready contact'}, {origin:'https://ready.example'}))).status).toBe(202);
+      const preflight = () => handler(new Request(`http://localhost/api/v1/sites/${siteId}/leads`, {method:'OPTIONS',headers:{origin:'https://ready.example','access-control-request-method':'POST','access-control-request-headers':'content-type'}}));
+      expect((await preflight()).status).toBe(204);
+      expect((await handler(request('events', {eventId:randomUUID(),path:'/foreign'}, {origin:'https://ready.example'}, otherSite))).status).toBe(403);
+      for (const [field,bad,good] of [['ownershipStatus','pending','verified'],['dnsStatus','pending','ready'],['certificateStatus','pending','ready'],['status','pending','ready']]) {
+        await pool.query(`UPDATE "Domain" SET "${field}"=$1 WHERE "id"=$2`,[bad,id]);
+        expect((await send()).status).toBe(403);
+        expect((await preflight()).status).toBe(403);
+        expect((await handler(request('leads', undefined, {origin:'https://ready.example'}))).status).toBe(403);
+        await pool.query(`UPDATE "Domain" SET "${field}"=$1 WHERE "id"=$2`,[good,id]);
+      }
+      await pool.query('UPDATE "Domain" SET "enabled"=false WHERE "id"=$1',[id]);
+      expect((await send()).status).toBe(403);
+    } finally { await pool.query('DELETE FROM "ActiveDeployment" WHERE "siteId"=$1',[siteId]);await pool.query('DELETE FROM "Domain" WHERE "id"=$1',[id]); }
+  });
   it('accepts all enabled active aliases and scopes ownership from URL and DB', async () => {
     const response = await handler(
       request(

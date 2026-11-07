@@ -92,7 +92,7 @@ export function createIngestHandler(
       return respond({ error: 'origin_not_allowed' }, 403);
     try {
       const site = await pool.query<{ workspaceId: string; hostname: string | null }>(
-        `SELECT site."workspaceId", domain."hostname" FROM "Site" site LEFT JOIN "Domain" domain ON domain."siteId"=site."id" AND domain."status"='active' AND domain."enabled"=true WHERE site."id"=$1`,
+        `SELECT site."workspaceId", domain."hostname" FROM "Site" site LEFT JOIN "Domain" domain ON domain."siteId"=site."id" AND domain."enabled"=true AND (domain."status"='active' OR (domain."status"='ready' AND domain."ownershipStatus"='verified' AND domain."dnsStatus"='ready' AND domain."certificateStatus"='ready' AND EXISTS (SELECT 1 FROM "ActiveDeployment" active WHERE active."siteId"=site."id" AND active."routeRevision">0))) WHERE site."id"=$1`,
         [route[1]],
       );
       if (!site.rowCount) return respond({ error: 'site_not_found' }, 404);

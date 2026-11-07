@@ -13,10 +13,11 @@ function internalResponse(body: unknown, status = 200): Response {
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ siteId: string }> },
+  database: Pool = pool,
 ): Promise<Response> {
   const { siteId } = await params;
   let principal;
-  try { principal = await authenticateSiteService(request, siteId, pool); }
+  try { principal = await authenticateSiteService(request, siteId, database); }
   catch (error) { return serviceScopeErrorResponse(error); }
   if (!uuid.test(siteId)) return internalResponse({ error: 'invalid_request' }, 400);
   const query = new URL(request.url).searchParams;
@@ -39,7 +40,7 @@ export async function GET(
     );
   }
   values.push(limit, skip);
-  const result = await pool.query(
+  const result = await database.query(
     `SELECT lead.* FROM "Lead" lead WHERE ${where.join(' AND ')} ORDER BY lead."createdAt" DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
     values,
   );
@@ -49,10 +50,11 @@ export async function GET(
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ siteId: string }> },
+  database: Pool = pool,
 ): Promise<Response> {
   const { siteId } = await params;
   let principal;
-  try { principal = await authenticateSiteService(request, siteId, pool); }
+  try { principal = await authenticateSiteService(request, siteId, database); }
   catch (error) { return serviceScopeErrorResponse(error); }
   if (!uuid.test(siteId)) return internalResponse({ error: 'invalid_request' }, 400);
   const id = new URL(request.url).searchParams.get('id');
@@ -84,7 +86,7 @@ export async function PATCH(
   }
   if (!fields.length) return internalResponse({ error: 'invalid_request' }, 400);
   values.push(id, siteId, principal.workspaceId);
-  const result = await pool.query(
+  const result = await database.query(
     `UPDATE "Lead" SET ${fields.join(', ')}, "updatedAt" = now() WHERE "id" = $${values.length - 2} AND "siteId" = $${values.length - 1} AND "workspaceId" = $${values.length} RETURNING *`,
     values,
   );
