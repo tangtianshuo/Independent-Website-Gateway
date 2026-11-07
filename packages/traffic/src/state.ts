@@ -33,7 +33,9 @@ function validRoute(value: unknown): value is RouteStateEntry {
 async function readState(path: string): Promise<RouteStateSnapshot> {
   const value = JSON.parse(await readFile(path, 'utf8')) as Partial<RouteStateSnapshot>;
   if (!Array.isArray(value.routes) || !Array.isArray(value.previous) ||
-      value.routes.some(route => !validRoute(route)) || value.previous.some(route => !validRoute(route))) {
+      value.routes.some(route => !validRoute(route)) || value.previous.some(route => !validRoute(route)) ||
+      new Set(value.routes.map(route => route.siteId)).size !== value.routes.length ||
+      new Set(value.previous.map(route => route.siteId)).size !== value.previous.length) {
     throw new Error('Invalid route state');
   }
   return { routes: value.routes, previous: value.previous };
@@ -47,7 +49,15 @@ export async function backupRouteState(sourcePath: string, backupPath: string): 
 }
 
 export async function restoreRouteState(backupPath: string, destinationPath: string): Promise<void> {
-  await readState(backupPath);
+  const backup = await readState(backupPath);
+  try {
+    const current = await readState(destinationPath);
+    const revisions = new Map<string, number>();
+    for (const route of backup.routes) revisions.set(route.siteId, Math.max(revisions.get(route.siteId) ?? -1, route.revision));
+    if ([...current.routes, ...current.previous].some(route => route.revision > (revisions.get(route.siteId) ?? -1))) throw new Error('newer_route_revision');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   await mkdir(dirname(destinationPath), { recursive: true });
   const temporaryPath = `${destinationPath}.${process.pid}.${Date.now()}.tmp`;
   try {
