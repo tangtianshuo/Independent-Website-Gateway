@@ -1,13 +1,32 @@
-import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import type { Pool } from 'pg';
-import { authenticateSiteService, serviceScopeErrorResponse } from './service-scope';
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import type { Pool } from "pg";
+import { readPublishFailureCount15m } from "../../../packages/worker/src/operations";
+import {
+  authenticateSiteService,
+  serviceScopeErrorResponse,
+} from "./service-scope";
 
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const uuid =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const digest = /^sha256:[a-f0-9]{64}$/;
 const maxSnapshotBytes = 10 * 1024 * 1024;
-const publicMetadataKeys = ['templateId', 'templateVersion', 'manifestChecksum', 'imageDigest', 'imageRepository', 'sourceCommit'] as const;
-const publicationStatuses = new Set(['pending', 'healthy', 'active', 'failed', 'degraded', 'unknown']);
+const publicMetadataKeys = [
+  "templateId",
+  "templateVersion",
+  "manifestChecksum",
+  "imageDigest",
+  "imageRepository",
+  "sourceCommit",
+] as const;
+const publicationStatuses = new Set([
+  "pending",
+  "healthy",
+  "active",
+  "failed",
+  "degraded",
+  "unknown",
+]);
 
 interface PublicationRow {
   desiredRevision: number;
@@ -28,11 +47,14 @@ interface PublicationRow {
 }
 
 function json(body: unknown, status = 200): Response {
-  return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+  return Response.json(body, {
+    status,
+    headers: { "Cache-Control": "no-store" },
+  });
 }
 
 function object(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function readSnapshot(path: string): Promise<Buffer> {
@@ -42,24 +64,30 @@ async function readSnapshot(path: string): Promise<Buffer> {
   for await (const chunk of createReadStream(path, { end: maxSnapshotBytes })) {
     const bytes = chunk as Buffer;
     length += bytes.length;
-    if (length > maxSnapshotBytes) throw new Error('Invalid snapshot size');
+    if (length > maxSnapshotBytes) throw new Error("Invalid snapshot size");
     chunks.push(bytes);
   }
   return Buffer.concat(chunks);
 }
 
-export async function readPublicationState(request: Request, siteId: string, pool: Pool): Promise<Response> {
+export async function readPublicationState(
+  request: Request,
+  siteId: string,
+  pool: Pool,
+): Promise<Response> {
   let principal;
   try {
     principal = await authenticateSiteService(request, siteId, pool);
   } catch (error) {
     return serviceScopeErrorResponse(error);
   }
-  if (!uuid.test(siteId) || !uuid.test(principal.workspaceId)) return json({ error: 'invalid_request' }, 400);
+  if (!uuid.test(siteId) || !uuid.test(principal.workspaceId))
+    return json({ error: "invalid_request" }, 400);
 
   try {
     // One statement reads a consistent desired revision and authoritative active tuple.
-    const result = await pool.query<PublicationRow>(`
+    const result = await pool.query<PublicationRow>(
+      `
       SELECT COALESCE(publication."desiredRevision", site."desiredRevision") AS "desiredRevision",
         COALESCE(publication."status", CASE WHEN active."releaseId" IS NULL THEN 'pending' ELSE 'unknown' END) AS "publicationStatus",
         COALESCE(publication."activeReleaseId", active."releaseId") AS "releaseId",
@@ -77,39 +105,110 @@ export async function readPublicationState(request: Request, siteId: string, poo
       LEFT JOIN "Deployment" deployment ON deployment."id" = active."id"
       LEFT JOIN "Release" saved ON saved."siteId" = site."id" AND saved."releaseId" = COALESCE(publication."activeReleaseId", active."releaseId")
       LEFT JOIN "ReleaseArtifact" artifact ON artifact."siteId" = site."id" AND artifact."releaseId" = COALESCE(publication."activeReleaseId", active."releaseId")
-      WHERE site."id" = $1 AND site."workspaceId" = $2`, [siteId, principal.workspaceId]);
-    if (!result.rowCount) return json({ error: 'site_not_found' }, 404);
+      WHERE site."id" = $1 AND site."workspaceId" = $2`,
+      [siteId, principal.workspaceId],
+    );
+    if (!result.rowCount) return json({ error: "site_not_found" }, 404);
     const row = result.rows[0];
-    if (!Number.isSafeInteger(row.desiredRevision) || row.desiredRevision < 0) throw new Error('Invalid revision');
-    const status = typeof row.publicationStatus === 'string' && publicationStatuses.has(row.publicationStatus)
-      ? row.publicationStatus
-      : row.deploymentHealthStatus === 'healthy' ? 'healthy' : undefined;
-    if (row.releaseId === null) return json({ revision: row.desiredRevision, ...(status ? { status } : {}), active: null });
-    if (!row.releaseId || !row.imageDigest || !digest.test(row.imageDigest) ||
-        !Number.isSafeInteger(row.routeRevision) || row.routeRevision! < 0 ||
-        !row.snapshotRef || !row.checksum || !digest.test(row.checksum) ||
-        !object(row.metadata) || !row.createdAt || !Number.isFinite(row.createdAt.getTime())) throw new Error('Invalid active release');
-    if (row.metadata.imageDigest !== undefined && row.metadata.imageDigest !== null && row.metadata.imageDigest !== '' &&
-        row.metadata.imageDigest !== row.imageDigest) throw new Error('Inconsistent image pin');
+    if (!Number.isSafeInteger(row.desiredRevision) || row.desiredRevision < 0)
+      throw new Error("Invalid revision");
+    const publishFailureCount15m = await readPublishFailureCount15m(
+      pool,
+      siteId,
+    );
+    const status =
+      typeof row.publicationStatus === "string" &&
+      publicationStatuses.has(row.publicationStatus)
+        ? row.publicationStatus
+        : row.deploymentHealthStatus === "healthy"
+          ? "healthy"
+          : undefined;
+    const observability = { publishFailureCount15m, windowMinutes: 15 };
+    if (row.releaseId === null)
+      return json({
+        revision: row.desiredRevision,
+        ...(status ? { status } : {}),
+        active: null,
+        observability,
+      });
+    if (
+      !row.releaseId ||
+      !row.imageDigest ||
+      !digest.test(row.imageDigest) ||
+      !Number.isSafeInteger(row.routeRevision) ||
+      row.routeRevision! < 0 ||
+      !row.snapshotRef ||
+      !row.checksum ||
+      !digest.test(row.checksum) ||
+      !object(row.metadata) ||
+      !row.createdAt ||
+      !Number.isFinite(row.createdAt.getTime())
+    )
+      throw new Error("Invalid active release");
+    if (
+      row.metadata.imageDigest !== undefined &&
+      row.metadata.imageDigest !== null &&
+      row.metadata.imageDigest !== "" &&
+      row.metadata.imageDigest !== row.imageDigest
+    )
+      throw new Error("Inconsistent image pin");
     const bytes = await readSnapshot(row.snapshotRef);
-    if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== row.checksum) throw new Error('Invalid snapshot checksum');
-    const snapshot: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    if (!object(snapshot) || snapshot.schemaVersion !== 1 || snapshot.workspaceId !== principal.workspaceId ||
-        snapshot.siteId !== siteId) throw new Error('Invalid snapshot identity');
+    if (
+      `sha256:${createHash("sha256").update(bytes).digest("hex")}` !==
+      row.checksum
+    )
+      throw new Error("Invalid snapshot checksum");
+    const snapshot: unknown = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    );
+    if (
+      !object(snapshot) ||
+      snapshot.schemaVersion !== 1 ||
+      snapshot.workspaceId !== principal.workspaceId ||
+      snapshot.siteId !== siteId
+    )
+      throw new Error("Invalid snapshot identity");
     const storedMetadata = row.metadata;
-    const metadata = Object.fromEntries(publicMetadataKeys.flatMap(key =>
-      typeof storedMetadata[key] === 'string' ? [[key, storedMetadata[key]]] : []));
-    const artifact = row.artifactId || row.artifactChecksum || row.assetManifestRef || row.rendererDigest || row.artifactStatus
-      ? { id: row.artifactId ?? null, checksum: row.artifactChecksum ?? row.checksum,
-          ...(row.assetManifestRef ? { assetManifestRef: row.assetManifestRef } : {}),
-          ...(row.rendererDigest ? { rendererDigest: row.rendererDigest } : {}),
-          status: row.artifactStatus ?? 'unknown' }
-      : undefined;
-    return json({ revision: row.desiredRevision, ...(status ? { status } : {}), active: {
-      releaseId: row.releaseId, imageDigest: row.imageDigest, routeRevision: row.routeRevision,
-      metadata, snapshot, createdAt: row.createdAt.toISOString(), ...(artifact ? { artifact } : {}),
-    } });
+    const metadata = Object.fromEntries(
+      publicMetadataKeys.flatMap((key) =>
+        typeof storedMetadata[key] === "string"
+          ? [[key, storedMetadata[key]]]
+          : [],
+      ),
+    );
+    const artifact =
+      row.artifactId ||
+      row.artifactChecksum ||
+      row.assetManifestRef ||
+      row.rendererDigest ||
+      row.artifactStatus
+        ? {
+            id: row.artifactId ?? null,
+            checksum: row.artifactChecksum ?? row.checksum,
+            ...(row.assetManifestRef
+              ? { assetManifestRef: row.assetManifestRef }
+              : {}),
+            ...(row.rendererDigest
+              ? { rendererDigest: row.rendererDigest }
+              : {}),
+            status: row.artifactStatus ?? "unknown",
+          }
+        : undefined;
+    return json({
+      revision: row.desiredRevision,
+      ...(status ? { status } : {}),
+      active: {
+        releaseId: row.releaseId,
+        imageDigest: row.imageDigest,
+        routeRevision: row.routeRevision,
+        metadata,
+        snapshot,
+        createdAt: row.createdAt.toISOString(),
+        ...(artifact ? { artifact } : {}),
+      },
+      observability,
+    });
   } catch {
-    return json({ error: 'publication_state_unavailable' }, 503);
+    return json({ error: "publication_state_unavailable" }, 503);
   }
 }
