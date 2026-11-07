@@ -32,7 +32,7 @@ jobs:
           --health-retries 5
     outputs:
       version: ${{ steps.release.outputs.version }}
-      publish: ${{ steps.release.outputs.publish }}
+      candidate: ${{ steps.release.outputs.publish }}
     env:
       DATABASE_URL: postgresql://gateway:gateway-test-only@localhost:5432/gateway
       GATEWAY_TEST_DATABASE_URL: postgresql://gateway:gateway-test-only@localhost:5432/gateway
@@ -50,7 +50,7 @@ jobs:
         id: release
         run: python3 .github/scripts/release.py
 
-  publish:
+  candidate:
     needs: verify
     if: needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
@@ -104,13 +104,5 @@ jobs:
           -R tangtianshuo/Independent-Website-Gateway
           --source-digest "$GITHUB_SHA"
           --source-ref "$GITHUB_REF"
-      - name: Deploy verified image
-        env:
-          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
-          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/deploy.sh
+      - name: Record candidate boundary
+        run: echo "Candidate only. Production deployment requires Platform release gate / platform-gate." >> "$GITHUB_STEP_SUMMARY"
