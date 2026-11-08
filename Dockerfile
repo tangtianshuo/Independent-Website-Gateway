@@ -11,6 +11,8 @@ RUN apt-get update \
 COPY . .
 
 RUN npm ci --no-audit --no-fund \
+    && npm run build --workspace @gateway/contracts \
+    && npm run build --workspace @gateway/traffic \
     && npm run build --workspace @gateway/worker \
     && npm run build --workspace @gateway/ingest \
     && npm run build --workspace @gateway/control
