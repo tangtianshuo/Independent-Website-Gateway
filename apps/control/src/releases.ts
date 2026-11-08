@@ -1,26 +1,49 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { link, mkdir, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { Pool } from 'pg';
-import { canonicalJson, validateReleaseInput } from '@gateway/contracts';
-import { authenticateSiteService, ServiceScopeError, serviceScopeErrorResponse } from './service-scope';
-import { artifactSnapshotPath, ensureArtifactReadable } from '../../../packages/worker/src/artifacts';
+import { createHash, randomUUID } from "node:crypto";
+import { link, mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { Pool } from "pg";
+import { canonicalJson, validateReleaseInput } from "@gateway/contracts";
+import { ensureMigrationArtifactRecord } from "./migrations/artifacts";
+import {
+  authenticateSiteService,
+  ServiceScopeError,
+  serviceScopeErrorResponse,
+} from "./service-scope";
+import {
+  artifactSnapshotPath,
+  ensureArtifactReadable,
+} from "../../../packages/worker/src/artifacts";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const maxRequestBytes = 14 * 1024 * 1024;
 
-export async function receiveRelease(request: Request, routeSiteId: string, database: Pool = pool): Promise<Response> {
+export async function receiveRelease(
+  request: Request,
+  routeSiteId: string,
+  database: Pool = pool,
+): Promise<Response> {
   let client;
   let temporaryPath: string | undefined;
   let finalPath: string | undefined;
   let ownsFinalPath = false;
   let committed = false;
   try {
-    const principal = await authenticateSiteService(request, routeSiteId, database);
-    const contentLengthHeader = request.headers.get('content-length');
-    const contentLength = contentLengthHeader === null ? 0 : Number(contentLengthHeader);
-    if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > maxRequestBytes) return Response.json({ error: 'request_too_large' }, { status: 413 });
-    if (!request.body) return Response.json({ error: 'invalid_release' }, { status: 400 });
+    const principal = await authenticateSiteService(
+      request,
+      routeSiteId,
+      database,
+    );
+    const contentLengthHeader = request.headers.get("content-length");
+    const contentLength =
+      contentLengthHeader === null ? 0 : Number(contentLengthHeader);
+    if (
+      !Number.isFinite(contentLength) ||
+      contentLength < 0 ||
+      contentLength > maxRequestBytes
+    )
+      return Response.json({ error: "request_too_large" }, { status: 413 });
+    if (!request.body)
+      return Response.json({ error: "invalid_release" }, { status: 400 });
     const chunks: Uint8Array[] = [];
     let receivedBytes = 0;
     const reader = request.body.getReader();
@@ -30,85 +53,161 @@ export async function receiveRelease(request: Request, routeSiteId: string, data
       receivedBytes += value.byteLength;
       if (receivedBytes > maxRequestBytes) {
         await reader.cancel();
-        return Response.json({ error: 'request_too_large' }, { status: 413 });
+        return Response.json({ error: "request_too_large" }, { status: 413 });
       }
       chunks.push(value);
     }
-    const raw = Buffer.concat(chunks).toString('utf8');
-    const input = validateReleaseInput(JSON.parse(raw), (process.env.ALLOWED_TEMPLATE_IDS ?? '').split(',').filter(Boolean));
-    if (input.siteId !== routeSiteId) return Response.json({ error: 'site_not_found' }, { status: 404 });
+    const raw = Buffer.concat(chunks).toString("utf8");
+    const input = validateReleaseInput(
+      JSON.parse(raw),
+      (process.env.ALLOWED_TEMPLATE_IDS ?? "").split(",").filter(Boolean),
+    );
+    if (input.siteId !== routeSiteId)
+      return Response.json({ error: "site_not_found" }, { status: 404 });
     client = await database.connect();
-    await client.query('BEGIN');
-    const site = await client.query('SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2 FOR UPDATE', [input.siteId, principal.workspaceId]);
+    await client.query("BEGIN");
+    const site = await client.query(
+      'SELECT "id" FROM "Site" WHERE "id" = $1 AND "workspaceId" = $2 FOR UPDATE',
+      [input.siteId, principal.workspaceId],
+    );
     if (!site.rowCount) {
-      await client.query('ROLLBACK');
-      return Response.json({ error: 'site_not_found' }, { status: 404 });
+      await client.query("ROLLBACK");
+      return Response.json({ error: "site_not_found" }, { status: 404 });
     }
 
-    const publicPin = await client.query(`SELECT "imageRepository", "manifestChecksum", "sourceCommit", "imageDigest", "version"
-      FROM "TemplatePin" WHERE "siteId" = $1 AND "templateId" = $2 FOR UPDATE`, [input.siteId, input.metadata.templateId]);
-    if (publicPin.rowCount && publicPin.rows[0].imageRepository !== null &&
-        (publicPin.rows[0].imageDigest !== input.metadata.imageDigest || publicPin.rows[0].version !== input.metadata.templateVersion ||
-         publicPin.rows[0].manifestChecksum !== input.metadata.manifestChecksum)) {
-      await client.query('ROLLBACK');
-      return Response.json({ error: 'template_pin_mismatch' }, { status: 409 });
+    const publicPin = await client.query(
+      `SELECT "imageRepository", "manifestChecksum", "sourceCommit", "imageDigest", "version"
+      FROM "TemplatePin" WHERE "siteId" = $1 AND "templateId" = $2 FOR UPDATE`,
+      [input.siteId, input.metadata.templateId],
+    );
+    if (
+      publicPin.rowCount &&
+      publicPin.rows[0].imageRepository !== null &&
+      (publicPin.rows[0].imageDigest !== input.metadata.imageDigest ||
+        publicPin.rows[0].version !== input.metadata.templateVersion ||
+        publicPin.rows[0].manifestChecksum !== input.metadata.manifestChecksum)
+    ) {
+      await client.query("ROLLBACK");
+      return Response.json({ error: "template_pin_mismatch" }, { status: 409 });
     }
 
     const metadata = {
       ...input.metadata,
-      checksum: createHash('sha256').update(JSON.stringify(input.metadata)).digest('hex'),
+      checksum: createHash("sha256")
+        .update(JSON.stringify(input.metadata))
+        .digest("hex"),
     };
-    const existing = await client.query('SELECT "checksum", "metadata", "snapshotRef" FROM "Release" WHERE "siteId" = $1 AND "releaseId" = $2', [input.siteId, input.releaseId]);
+    const existing = await client.query(
+      'SELECT "checksum", "metadata", "snapshotRef" FROM "Release" WHERE "siteId" = $1 AND "releaseId" = $2',
+      [input.siteId, input.releaseId],
+    );
     if (existing.rowCount) {
-      if (existing.rows[0].checksum !== input.checksum || canonicalJson(existing.rows[0].metadata) !== canonicalJson(metadata)) {
-        await client.query('ROLLBACK');
-        return Response.json({ error: 'release_conflict' }, { status: 409 });
+      if (
+        existing.rows[0].checksum !== input.checksum ||
+        canonicalJson(existing.rows[0].metadata) !== canonicalJson(metadata)
+      ) {
+        await client.query("ROLLBACK");
+        return Response.json({ error: "release_conflict" }, { status: 409 });
       }
-      const directory = process.env.SNAPSHOT_STORAGE_PATH ?? '/var/lib/gateway/snapshots';
-      if (existing.rows[0].snapshotRef !== artifactSnapshotPath(directory, input.siteId, input.releaseId)) throw new Error('Invalid managed artifact path');
-      await ensureArtifactReadable(directory, input.siteId, input.releaseId, input.checksum);
-      await client.query(`INSERT INTO "ReleaseArtifact"
-        ("id", "siteId", "releaseId", "snapshotRef", "checksum", "assetManifestRef", "rendererDigest", "status", "updatedAt")
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
-        ON CONFLICT ("siteId", "releaseId") DO UPDATE SET
-          "snapshotRef" = COALESCE("ReleaseArtifact"."snapshotRef", EXCLUDED."snapshotRef"),
-          "checksum" = EXCLUDED."checksum",
-          "assetManifestRef" = EXCLUDED."assetManifestRef",
-          "rendererDigest" = EXCLUDED."rendererDigest",
-          "status" = CASE WHEN EXCLUDED."snapshotRef" IS NULL THEN "ReleaseArtifact"."status" ELSE 'available' END,
-          "updatedAt" = now()`, [randomUUID(), input.siteId, input.releaseId, existing.rows[0].snapshotRef, input.checksum,
-        input.metadata.manifestChecksum, input.metadata.imageDigest, existing.rows[0].snapshotRef ? 'available' : 'invalid']);
-      await client.query('COMMIT');
+      const directory =
+        process.env.SNAPSHOT_STORAGE_PATH ?? "/var/lib/gateway/snapshots";
+      if (
+        existing.rows[0].snapshotRef !==
+        artifactSnapshotPath(directory, input.siteId, input.releaseId)
+      )
+        throw new Error("Invalid managed artifact path");
+      await ensureArtifactReadable(
+        directory,
+        input.siteId,
+        input.releaseId,
+        input.checksum,
+      );
+      await ensureMigrationArtifactRecord(client, {
+        siteId: input.siteId,
+        releaseId: input.releaseId,
+        checksum: input.checksum,
+        manifestChecksum: input.metadata.manifestChecksum,
+        rendererDigest: input.metadata.imageDigest,
+        snapshotRef: existing.rows[0].snapshotRef,
+      });
+      await client.query("COMMIT");
       committed = true;
-      return Response.json({ siteId: input.siteId, releaseId: input.releaseId, checksum: input.checksum }, { status: 200 });
+      return Response.json(
+        {
+          siteId: input.siteId,
+          releaseId: input.releaseId,
+          checksum: input.checksum,
+        },
+        { status: 200 },
+      );
     }
 
-    const bytes = Buffer.from(input.snapshot, 'base64');
-    const directory = process.env.SNAPSHOT_STORAGE_PATH ?? '/var/lib/gateway/snapshots';
+    const bytes = Buffer.from(input.snapshot, "base64");
+    const directory =
+      process.env.SNAPSHOT_STORAGE_PATH ?? "/var/lib/gateway/snapshots";
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const key = createHash('sha256').update(`${input.siteId}:${input.releaseId}`).digest('hex');
+    const key = createHash("sha256")
+      .update(`${input.siteId}:${input.releaseId}`)
+      .digest("hex");
     finalPath = join(directory, `${key}.snapshot`);
     temporaryPath = join(directory, `${key}.${randomUUID()}.tmp`);
-    await writeFile(temporaryPath, bytes, { flag: 'wx', mode: 0o600 });
+    await writeFile(temporaryPath, bytes, { flag: "wx", mode: 0o600 });
     await link(temporaryPath, finalPath);
     ownsFinalPath = true;
-    await ensureArtifactReadable(directory, input.siteId, input.releaseId, input.checksum);
-    await client.query('INSERT INTO "Release" ("id", "siteId", "releaseId", "checksum", "metadata", "snapshotRef") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [randomUUID(), input.siteId, input.releaseId, input.checksum, JSON.stringify(metadata), finalPath]);
-    await client.query(`INSERT INTO "ReleaseArtifact"
-      ("id", "siteId", "releaseId", "snapshotRef", "checksum", "assetManifestRef", "rendererDigest", "status", "updatedAt")
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'available', now())`, [randomUUID(), input.siteId, input.releaseId, finalPath,
-      input.checksum, input.metadata.manifestChecksum, input.metadata.imageDigest]);
-    await client.query('COMMIT');
+    await ensureArtifactReadable(
+      directory,
+      input.siteId,
+      input.releaseId,
+      input.checksum,
+    );
+    await client.query(
+      'INSERT INTO "Release" ("id", "siteId", "releaseId", "checksum", "metadata", "snapshotRef") VALUES ($1, $2, $3, $4, $5::jsonb, $6)',
+      [
+        randomUUID(),
+        input.siteId,
+        input.releaseId,
+        input.checksum,
+        JSON.stringify(metadata),
+        finalPath,
+      ],
+    );
+    await ensureMigrationArtifactRecord(client, {
+      siteId: input.siteId,
+      releaseId: input.releaseId,
+      checksum: input.checksum,
+      manifestChecksum: input.metadata.manifestChecksum,
+      rendererDigest: input.metadata.imageDigest,
+      snapshotRef: finalPath,
+    });
+    await client.query("COMMIT");
     committed = true;
-    return Response.json({ siteId: input.siteId, releaseId: input.releaseId, checksum: input.checksum }, { status: 201 });
+    return Response.json(
+      {
+        siteId: input.siteId,
+        releaseId: input.releaseId,
+        checksum: input.checksum,
+      },
+      { status: 201 },
+    );
   } catch (error) {
-    if (client) await client.query('ROLLBACK').catch(() => undefined);
-    if (error instanceof ServiceScopeError || error instanceof Error && error.message === 'Unauthorized') return serviceScopeErrorResponse(error);
-    if (error instanceof SyntaxError || error instanceof Error && /Invalid|Template|checksum/.test(error.message)) return Response.json({ error: 'invalid_release' }, { status: 400 });
-    if (ownsFinalPath && !committed) await rm(finalPath!, { force: true }).catch(() => undefined);
-    return Response.json({ error: 'release_unavailable' }, { status: 503 });
+    if (client) await client.query("ROLLBACK").catch(() => undefined);
+    if (
+      error instanceof ServiceScopeError ||
+      (error instanceof Error && error.message === "Unauthorized")
+    )
+      return serviceScopeErrorResponse(error);
+    if (
+      error instanceof SyntaxError ||
+      (error instanceof Error &&
+        /Invalid|Template|checksum/.test(error.message))
+    )
+      return Response.json({ error: "invalid_release" }, { status: 400 });
+    if (ownsFinalPath && !committed)
+      await rm(finalPath!, { force: true }).catch(() => undefined);
+    return Response.json({ error: "release_unavailable" }, { status: 503 });
   } finally {
-    if (temporaryPath) await rm(temporaryPath, { force: true }).catch(() => undefined);
+    if (temporaryPath)
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
     client?.release();
   }
 }
