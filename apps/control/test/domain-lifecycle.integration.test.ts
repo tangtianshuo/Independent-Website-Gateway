@@ -141,6 +141,7 @@ async function withPublishedDomains(run: (fixture: PublishedDomainFixture) => Pr
     await pool.query('INSERT INTO "ReleaseArtifact" ("id","siteId","releaseId","checksum","updatedAt") VALUES ($1,$2,$3,$4,now())',[artifactId,site.siteId,'release','test']);
     await pool.query('INSERT INTO "Deployment" ("id","siteId","releaseId","artifactId","imageDigest","host","routeRevision") VALUES ($1,$2,$3,$4,$5,$6,1)',[deploymentId,site.siteId,'release',artifactId,'test',primaryHost]);
     await pool.query('INSERT INTO "ActiveDeployment" ("id","siteId","releaseId","imageDigest","routeRevision") VALUES ($1,$2,$3,$4,1)',[deploymentId,site.siteId,'release','test']);
+    await pool.query('UPDATE "Site" SET "desiredRevision"=1,"desiredReleaseId"=$1,"updatedAt"=now() WHERE "id"=$2',['release',site.siteId]);
     await router.applyRoute(site.siteId,1,port,primaryHost,'committed','container','release',[defaultHost,aliasHost]);
     const fetchHost=(host:string)=>new Promise<{status:number;location?:string;body:string}>((resolve,reject)=>{
       const req=request({hostname:'127.0.0.1',port:proxy.port(),path:'/catalog?sort=new',headers:{host}},res=>{let body='';res.on('data',chunk=>body+=chunk);res.on('end',()=>resolve({status:res.statusCode!,location:res.headers.location,body}));});req.on('error',reject);req.end();
@@ -211,7 +212,7 @@ async function withPublishedDomains(run: (fixture: PublishedDomainFixture) => Pr
     const active=async()=>[...await a.active(),...await b.active()];
     await router.recover(active,async()=>true);
     process.env.CMS_INSTANCE_ID=b.instance;
-    const publish=await createPublishOperation(b.req({releaseId:'release',idempotencyKey:'progress-b',expectedRevision:0}),b.site.siteId,b.pool);
+    const publish=await createPublishOperation(b.req({releaseId:'release',idempotencyKey:'progress-b',expectedRevision:1}),b.site.siteId,b.pool);
     expect(publish.status).toBe(201);
     const workerId=randomUUID();
     // This is the exact production domain-then-publication sequence, without a

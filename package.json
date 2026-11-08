@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "npm run dev --workspace @gateway/control",
     "build": "npm run build --workspaces --if-present",
+    "pretest": "npm run build --workspace @gateway/traffic",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

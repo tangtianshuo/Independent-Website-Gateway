@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
@@ -8,6 +8,7 @@ import {
   ArtifactIdentityConflict,
   ensureMigrationArtifact,
 } from "../src/migrations/artifacts";
+import { artifactSnapshotPath } from "../../../packages/worker/src/artifacts";
 
 const connectionString = process.env.GATEWAY_TEST_DATABASE_URL;
 const run = connectionString ? describe : describe.skip;
@@ -38,12 +39,19 @@ run("legacy migration artifact PostgreSQL integration", () => {
       'INSERT INTO "Site" ("id", "workspaceId", "updatedAt") VALUES ($1, $2, now())',
       [siteId, workspaceId],
     );
+    for (const releaseId of ["legacy-release", "artifact-conflict"]) {
+      await pool.query(
+        'INSERT INTO "Release" ("id", "siteId", "releaseId", "checksum", "metadata") VALUES ($1, $2, $3, $4, $5)',
+        [randomUUID(), siteId, releaseId, checksum, "{}"],
+      );
+    }
   });
 
   afterAll(async () => {
     await pool.query('DELETE FROM "ReleaseArtifact" WHERE "siteId" = $1', [
       siteId,
     ]);
+    await pool.query('DELETE FROM "Release" WHERE "siteId" = $1', [siteId]);
     await pool.query('DELETE FROM "Site" WHERE "id" = $1', [siteId]);
     await pool.query('DELETE FROM "Workspace" WHERE "id" = $1', [workspaceId]);
     await pool.end();
@@ -89,6 +97,35 @@ run("legacy migration artifact PostgreSQL integration", () => {
   });
 
   it("maps an immutable artifact identity conflict to HTTP 409", async () => {
+    const snapshot = Buffer.from('{"title":"artifact conflict"}');
+    const incomingChecksum = `sha256:${createHash("sha256")
+      .update(snapshot)
+      .digest("hex")}`;
+    const metadata = {
+      templateId: "example",
+      templateVersion: "1.0.0",
+      manifestChecksum,
+      imageDigest: rendererDigest,
+    };
+    const metadataChecksum = createHash("sha256")
+      .update(JSON.stringify(metadata))
+      .digest("hex");
+    const managedSnapshot = artifactSnapshotPath(
+      directory,
+      siteId,
+      "artifact-conflict",
+    );
+    await writeFile(managedSnapshot, snapshot, { mode: 0o600 });
+    await pool.query(
+      'UPDATE "Release" SET "checksum" = $1, "snapshotRef" = $2, "metadata" = $3::jsonb WHERE "siteId" = $4 AND "releaseId" = $5',
+      [
+        incomingChecksum,
+        managedSnapshot,
+        JSON.stringify({ ...metadata, checksum: metadataChecksum }),
+        siteId,
+        "artifact-conflict",
+      ],
+    );
     await pool.query(
       `INSERT INTO "ReleaseArtifact"
         ("id", "siteId", "releaseId", "snapshotRef", "checksum", "assetManifestRef", "rendererDigest", "status", "updatedAt")
@@ -103,20 +140,11 @@ run("legacy migration artifact PostgreSQL integration", () => {
         rendererDigest,
       ],
     );
-    const snapshot = Buffer.from('{"title":"artifact conflict"}');
-    const incomingChecksum = `sha256:${createHash("sha256")
-      .update(snapshot)
-      .digest("hex")}`;
     const payload = {
       siteId,
       releaseId: "artifact-conflict",
       checksum: incomingChecksum,
-      metadata: {
-        templateId: "example",
-        templateVersion: "1.0.0",
-        manifestChecksum,
-        imageDigest: rendererDigest,
-      },
+      metadata,
       snapshot: snapshot.toString("base64"),
     };
     const { validateReleaseInput } = await import("@gateway/contracts");
