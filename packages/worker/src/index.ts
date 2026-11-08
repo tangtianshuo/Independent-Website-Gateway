@@ -1,107 +1,211 @@
-import { randomBytes, randomUUID } from 'node:crypto';
-import { createServer } from 'node:net';
-import { request as httpRequest } from 'node:http';
-import { basename, dirname, join } from 'node:path';
-import { Pool } from 'pg';
-import { pathToFileURL } from 'node:url';
-import { artifactSnapshotPath, ensureArtifactReadable } from './artifacts.js';
-import { scheduleWorkerOperations } from './scheduling.js';
-import { projectReservedDomains } from './domain-changes.js';
-import { readDomainRoute } from './domain-routing.js';
-import { deployCandidate } from './deployment.js';
-import { createDockerEngineClient } from './docker-client.js';
-import { createDockerCandidateAdapter } from './docker.js';
-import { collectRetiredContainers, createRetirementClient } from './retirement.js';
-import { pullApprovedImage } from './pull.js';
-import { failPublishOperation, finalizeAfterRouteVerification, persistCandidateCredential } from './operations.js';
-import { checkCandidate, createLocalRouter, type Route } from './runtime.js';
+import { randomBytes, randomUUID } from "node:crypto";
+import { createServer } from "node:net";
+import { request as httpRequest } from "node:http";
+import { basename, dirname, join } from "node:path";
+import { Pool } from "pg";
+import { pathToFileURL } from "node:url";
+import { artifactSnapshotPath, ensureArtifactReadable } from "./artifacts.js";
+import { scheduleWorkerOperations } from "./scheduling.js";
+import { readPublishLimits } from "./claim.js";
+import { projectReservedDomains } from "./domain-changes.js";
+import { readDomainRoute } from "./domain-routing.js";
+import { deployCandidate } from "./deployment.js";
+import { createDockerEngineClient } from "./docker-client.js";
+import { createDockerCandidateAdapter } from "./docker.js";
+import {
+  collectRetiredContainers,
+  createRetirementClient,
+} from "./retirement.js";
+import { pullApprovedImage } from "./pull.js";
+import {
+  failPublishOperation,
+  finalizeAfterRouteVerification,
+  persistCandidateCredential,
+} from "./operations.js";
+import { checkCandidate, createLocalRouter, type Route } from "./runtime.js";
 
-import { requireDatabaseRuntimeScope, runtimeOwnership } from './runtime-scope.js';
+import {
+  requireDatabaseRuntimeScope,
+  runtimeOwnership,
+} from "./runtime-scope.js";
 
-export const workerStatus = 'running' as const;
+export const workerStatus = "running" as const;
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 
 async function reservePort(): Promise<number> {
   const server = createServer();
-  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve, reject) =>
+    server.once("error", reject).listen(0, "127.0.0.1", resolve),
+  );
   const address = server.address();
-  const port = address && typeof address !== 'string' ? address.port : 0;
-  await new Promise<void>(resolve => server.close(() => resolve()));
+  const port = address && typeof address !== "string" ? address.port : 0;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   return port;
 }
 
-export function inspectRoute(socketPath: string, route: Route, runtimeScope?: string): Promise<boolean> {
+export function inspectRoute(
+  socketPath: string,
+  route: Route,
+  runtimeScope?: string,
+): Promise<boolean> {
   const ownership = runtimeOwnership(runtimeScope);
-  if (!route.containerId || !/^[a-zA-Z0-9_-]{1,128}$/.test(route.containerId)) return Promise.resolve(false);
-  return new Promise(resolve => {
-    const request = httpRequest({ socketPath, path: `/containers/${route.containerId}/json`, method: 'GET', timeout: 3000 }, response => {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      response.on('data', (chunk: Buffer) => { size += chunk.length; if (size < 1024 * 1024) chunks.push(chunk); else request.destroy(); });
-      response.on('end', () => {
-        try {
-          if (response.statusCode !== 200) return resolve(false);
-          const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          const binding = data.NetworkSettings?.Ports?.['3000/tcp'];
-          resolve(data.Id === route.containerId && data.State?.Running === true &&
-            ownership.matches(data.Config?.Labels) &&
-            data.Config?.Labels?.[ownership.siteKey] === route.siteId &&
-            data.Config?.Labels?.[ownership.releaseKey] === route.releaseId &&
-            Array.isArray(binding) && binding.length === 1 && binding[0].HostIp === '127.0.0.1' &&
-            binding[0].HostPort === String(route.port));
-        } catch { resolve(false); }
-      });
-    });
-    request.on('timeout', () => request.destroy());
-    request.on('error', () => resolve(false));
+  if (!route.containerId || !/^[a-zA-Z0-9_-]{1,128}$/.test(route.containerId))
+    return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const request = httpRequest(
+      {
+        socketPath,
+        path: `/containers/${route.containerId}/json`,
+        method: "GET",
+        timeout: 3000,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size < 1024 * 1024) chunks.push(chunk);
+          else request.destroy();
+        });
+        response.on("end", () => {
+          try {
+            if (response.statusCode !== 200) return resolve(false);
+            const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            const binding = data.NetworkSettings?.Ports?.["3000/tcp"];
+            resolve(
+              data.Id === route.containerId &&
+                data.State?.Running === true &&
+                ownership.matches(data.Config?.Labels) &&
+                data.Config?.Labels?.[ownership.siteKey] === route.siteId &&
+                data.Config?.Labels?.[ownership.releaseKey] ===
+                  route.releaseId &&
+                Array.isArray(binding) &&
+                binding.length === 1 &&
+                binding[0].HostIp === "127.0.0.1" &&
+                binding[0].HostPort === String(route.port),
+            );
+          } catch {
+            resolve(false);
+          }
+        });
+      },
+    );
+    request.on("timeout", () => request.destroy());
+    request.on("error", () => resolve(false));
     request.end();
   });
 }
 
 export async function runWorker() {
   const databaseUrl = process.env.DATABASE_URL;
-  const ingestOrigin = process.env.NUXT_PUBLIC_INGEST_ORIGIN || '';
-  const digest = process.env.GATEWAY_APPROVED_IMAGE_DIGEST ?? '';
+  const publishLimits = readPublishLimits();
+  const ingestOrigin = process.env.NUXT_PUBLIC_INGEST_ORIGIN || "";
+  const digest = process.env.GATEWAY_APPROVED_IMAGE_DIGEST ?? "";
   const gatewayUrl = process.env.GATEWAY_CONTROL_URL;
   const platform = process.env.GATEWAY_DOCKER_PLATFORM || undefined;
   const snapshotHostDir = process.env.GATEWAY_SNAPSHOT_HOST_DIR;
-  if ((platform !== undefined && !['linux/amd64', 'linux/arm64'].includes(platform)) || !databaseUrl || (digest !== '' && !digestPattern.test(digest)) ||
-      !gatewayUrl || !/^http:\/\/host\.docker\.internal:[1-9][0-9]{0,4}$/.test(gatewayUrl)) throw new Error('Invalid worker configuration');
+  if (
+    (platform !== undefined &&
+      !["linux/amd64", "linux/arm64"].includes(platform)) ||
+    !databaseUrl ||
+    (digest !== "" && !digestPattern.test(digest)) ||
+    !gatewayUrl ||
+    !/^http:\/\/host\.docker\.internal:[1-9][0-9]{0,4}$/.test(gatewayUrl)
+  )
+    throw new Error("Invalid worker configuration");
   const pool = new Pool({ connectionString: databaseUrl });
   let runtimeScope: string | undefined;
-  try { runtimeScope = await requireDatabaseRuntimeScope(pool, process.env.GATEWAY_RUNTIME_SCOPE); }
-  catch (error) { await pool.end(); throw error; }
-  const socketPath = process.env.DOCKER_SOCKET_PATH ?? (process.platform === 'win32' ? '//./pipe/docker_engine' : '/var/run/docker.sock');
-  const router = createLocalRouter(process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json', route => inspectRoute(socketPath, route, runtimeScope));
+  try {
+    runtimeScope = await requireDatabaseRuntimeScope(
+      pool,
+      process.env.GATEWAY_RUNTIME_SCOPE,
+    );
+  } catch (error) {
+    await pool.end();
+    throw error;
+  }
+  const socketPath =
+    process.env.DOCKER_SOCKET_PATH ??
+    (process.platform === "win32"
+      ? "//./pipe/docker_engine"
+      : "/var/run/docker.sock");
+  const router = createLocalRouter(
+    process.env.GATEWAY_ROUTE_STATE_PATH ?? "./gateway-routes.json",
+    (route) => inspectRoute(socketPath, route, runtimeScope),
+  );
   const workerId = randomUUID();
-  await pool.query('SELECT 1');
-  await router.recover(async () => {
-    const active = await pool.query<{ siteId: string; releaseId: string; routeRevision: number; host: string | null }>(
-      `SELECT active."siteId", active."releaseId", active."routeRevision", deployment."host" FROM "ActiveDeployment" active
+  await pool.query("SELECT 1");
+  await router.recover(
+    async () => {
+      const active = await pool.query<{
+        siteId: string;
+        releaseId: string;
+        routeRevision: number;
+        host: string | null;
+      }>(
+        `SELECT active."siteId", active."releaseId", active."routeRevision", deployment."host" FROM "ActiveDeployment" active
        LEFT JOIN "Deployment" deployment ON deployment."id" = active."id"
-       JOIN "Site" site ON site."id" = active."siteId"`);
-    return active.rows;
-  }, route => inspectRoute(socketPath, route, runtimeScope));
+       JOIN "Site" site ON site."id" = active."siteId"`,
+      );
+      return active.rows;
+    },
+    (route) => inspectRoute(socketPath, route, runtimeScope),
+  );
   const retirement = createRetirementClient(socketPath, runtimeScope);
   let nextCollection = 0;
   let stopping = false;
-  const stop = () => { stopping = true; };
-  process.once('SIGINT', stop); process.once('SIGTERM', stop);
-  console.info('Gateway worker started');
+  const stop = () => {
+    stopping = true;
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  console.info("Gateway worker started");
   try {
     while (!stopping) {
       try {
         if (Date.now() >= nextCollection) {
           nextCollection = Date.now() + 5000;
           try {
-            const collected = await collectRetiredContainers(pool, router.protectedRoutes(), retirement);
-            if (collected.removed || collected.failed) console.info('Container retirement:', JSON.stringify(collected));
-          } catch { console.error('Container retirement unavailable; will retry'); }
+            const collected = await collectRetiredContainers(
+              pool,
+              router.protectedRoutes(),
+              retirement,
+            );
+            if (collected.removed || collected.failed)
+              console.info("Container retirement:", JSON.stringify(collected));
+          } catch {
+            console.error("Container retirement unavailable; will retry");
+          }
         }
-        await projectReservedDomains(pool, process.env.GATEWAY_DOMAIN_STATE_PATH ?? join(dirname(process.env.GATEWAY_ROUTE_STATE_PATH ?? './gateway-routes.json'), 'domains.json'));
-        const claim = await scheduleWorkerOperations(pool, router, workerId, async route => await inspectRoute(socketPath, route, runtimeScope) && await checkCandidate(route.port, route.host, '/'));
+        await projectReservedDomains(
+          pool,
+          process.env.GATEWAY_DOMAIN_STATE_PATH ??
+            join(
+              dirname(
+                process.env.GATEWAY_ROUTE_STATE_PATH ?? "./gateway-routes.json",
+              ),
+              "domains.json",
+            ),
+        );
+        const claim = await scheduleWorkerOperations(
+          pool,
+          router,
+          workerId,
+          async (route) =>
+            (await inspectRoute(socketPath, route, runtimeScope)) &&
+            (await checkCandidate(route.port, route.host, "/")),
+          publishLimits,
+        );
         if (claim) {
-          const selected = await pool.query<{ imageDigest: string; imageRepository: string | null; manifestChecksum: string | null; sourceCommit: string | null; snapshotRef: string | null; checksum: string }>(`
+          const selected = await pool.query<{
+            imageDigest: string;
+            imageRepository: string | null;
+            manifestChecksum: string | null;
+            sourceCommit: string | null;
+            snapshotRef: string | null;
+            checksum: string;
+          }>(
+            `
             SELECT pin."imageDigest", pin."imageRepository", pin."manifestChecksum", pin."sourceCommit",
               COALESCE(artifact."checksum", release."checksum") AS "checksum", COALESCE(artifact."snapshotRef", release."snapshotRef") AS "snapshotRef" FROM "Release" release JOIN "TemplatePin" pin
               ON pin."siteId" = release."siteId" AND pin."templateId" = release."metadata"->>'templateId'
@@ -112,96 +216,254 @@ export async function runWorker() {
               AND ((pin."imageRepository" IS NULL AND pin."manifestChecksum" IS NULL AND pin."sourceCommit" IS NULL AND pin."imageDigest" = $3)
                 OR (pin."imageRepository" = 'ghcr.io/tangtianshuo/independent-website-templates/' || pin."templateId"
                   AND pin."manifestChecksum" = release."metadata"->>'manifestChecksum'
-                  AND pin."manifestChecksum" ~ '^sha256:[a-f0-9]{64}$' AND pin."sourceCommit" ~ '^[a-f0-9]{40}$'))`, [claim.siteId, claim.releaseId, digest]);
+                  AND pin."manifestChecksum" ~ '^sha256:[a-f0-9]{64}$' AND pin."sourceCommit" ~ '^[a-f0-9]{40}$'))`,
+            [claim.siteId, claim.releaseId, digest],
+          );
           if (!selected.rowCount) {
-            await failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' });
+            await failPublishOperation(pool, {
+              operationId: claim.id,
+              workerId,
+              attempts: claim.attempts,
+              leaseUntil: claim.leaseUntil,
+              failureCode: "CANDIDATE_CREATE_FAILED",
+            });
             continue;
           }
           const image = selected.rows[0].imageRepository
-            ? { repository: selected.rows[0].imageRepository, digest: selected.rows[0].imageDigest, sourceCommit: selected.rows[0].sourceCommit ?? undefined, manifestChecksum: selected.rows[0].manifestChecksum ?? undefined }
-            : { repository: 'local', digest: selected.rows[0].imageDigest };
+            ? {
+                repository: selected.rows[0].imageRepository,
+                digest: selected.rows[0].imageDigest,
+                sourceCommit: selected.rows[0].sourceCommit ?? undefined,
+                manifestChecksum:
+                  selected.rows[0].manifestChecksum ?? undefined,
+              }
+            : { repository: "local", digest: selected.rows[0].imageDigest };
           const remainingLeaseMs = claim.leaseUntil.getTime() - Date.now();
-          const approvedImages = [image.repository === 'local' ? image.digest : `${image.repository}@${image.digest}`];
-          if (image.repository !== 'local') {
+          const approvedImages = [
+            image.repository === "local"
+              ? image.digest
+              : `${image.repository}@${image.digest}`,
+          ];
+          if (image.repository !== "local") {
             const pullBudgetMs = Math.min(120_000, remainingLeaseMs - 60_000);
             if (pullBudgetMs <= 0) {
-              await failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' });
+              await failPublishOperation(pool, {
+                operationId: claim.id,
+                workerId,
+                attempts: claim.attempts,
+                leaseUntil: claim.leaseUntil,
+                failureCode: "CANDIDATE_CREATE_FAILED",
+              });
               continue;
             }
-            const pullDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: pullBudgetMs, approvedImages, runtimeScope });
-            if (!await pullApprovedImage(
-              () => pullDocker.pull(`${image.repository}@${image.digest}`),
-              () => failPublishOperation(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, failureCode: 'CANDIDATE_CREATE_FAILED' }),
-            )) continue;
+            const pullDocker = createDockerEngineClient({
+              socketPath,
+              platform,
+              timeoutMs: pullBudgetMs,
+              approvedImages,
+              runtimeScope,
+            });
+            if (
+              !(await pullApprovedImage(
+                () => pullDocker.pull(`${image.repository}@${image.digest}`),
+                () =>
+                  failPublishOperation(pool, {
+                    operationId: claim.id,
+                    workerId,
+                    attempts: claim.attempts,
+                    leaseUntil: claim.leaseUntil,
+                    failureCode: "CANDIDATE_CREATE_FAILED",
+                    retryCode: "registry_unavailable",
+                  }),
+              ))
+            )
+              continue;
           }
-          const claimDocker = createDockerEngineClient({ socketPath, platform, timeoutMs: Math.min(15_000, Math.max(1, claim.leaseUntil.getTime() - Date.now() - 10_000)), approvedImages, runtimeScope });
-          const adapter = createDockerCandidateAdapter(claimDocker, { network: 'gateway-sites', images: [image], ingestOrigin, runtimeScope });
-          const credential = randomBytes(32).toString('hex');
-          if (!await persistCandidateCredential(pool, { operationId: claim.id, workerId, attempts: claim.attempts, leaseUntil: claim.leaseUntil, credential })) continue;
+          const claimDocker = createDockerEngineClient({
+            socketPath,
+            platform,
+            timeoutMs: Math.min(
+              15_000,
+              Math.max(1, claim.leaseUntil.getTime() - Date.now() - 10_000),
+            ),
+            approvedImages,
+            runtimeScope,
+          });
+          const adapter = createDockerCandidateAdapter(claimDocker, {
+            network: "gateway-sites",
+            images: [image],
+            ingestOrigin,
+            runtimeScope,
+          });
+          const credential = randomBytes(32).toString("hex");
+          if (
+            !(await persistCandidateCredential(pool, {
+              operationId: claim.id,
+              workerId,
+              attempts: claim.attempts,
+              leaseUntil: claim.leaseUntil,
+              credential,
+            }))
+          )
+            continue;
           let candidatePort = 0;
           const containerPorts = new Map<string, number>();
           try {
-            let domainRoute: Awaited<ReturnType<typeof readDomainRoute>> | undefined;
+            let domainRoute:
+              Awaited<ReturnType<typeof readDomainRoute>> | undefined;
             await deployCandidate(claim, image, {
-              getRepresentativeHost: async siteId => {
+              getRepresentativeHost: async (siteId) => {
                 domainRoute = await readDomainRoute(pool, siteId);
                 return domainRoute.host;
               },
               getRedirectHosts: async () => domainRoute?.redirectHosts ?? [],
-              readRoute: siteId => router.readRoute(siteId),
-              readDeploymentState: async operationId => {
-                const state = await pool.query(`SELECT operation."status", operation."desiredRevision", operation."leaseOwner",
+              readRoute: (siteId) => router.readRoute(siteId),
+              readDeploymentState: async (operationId) => {
+                const state = await pool.query(
+                  `SELECT operation."status", operation."desiredRevision", operation."leaseOwner",
                   operation."leaseUntil", operation."attempts", deployment."releaseId", deployment."imageDigest", deployment."routeRevision"
                   FROM "PublishOperation" operation LEFT JOIN "ActiveDeployment" deployment ON deployment."siteId" = operation."siteId"
-                  WHERE operation."id" = $1`, [operationId]);
+                  WHERE operation."id" = $1`,
+                  [operationId],
+                );
                 const row = state.rows[0];
-                return row ? { status: row.status, desiredRevision: row.desiredRevision, leaseOwner: row.leaseOwner,
-                  leaseUntil: row.leaseUntil, attempts: row.attempts,
-                  active: row.releaseId ? { releaseId: row.releaseId, imageDigest: row.imageDigest, routeRevision: row.routeRevision } : null } : null;
+                return row
+                  ? {
+                      status: row.status,
+                      desiredRevision: row.desiredRevision,
+                      leaseOwner: row.leaseOwner,
+                      leaseUntil: row.leaseUntil,
+                      attempts: row.attempts,
+                      active: row.releaseId
+                        ? {
+                            releaseId: row.releaseId,
+                            imageDigest: row.imageDigest,
+                            routeRevision: row.routeRevision,
+                          }
+                        : null,
+                    }
+                  : null;
               },
-              startCandidate: async candidate => {
+              startCandidate: async (candidate) => {
                 candidatePort = await reservePort();
                 const snapshotRef = selected.rows[0].snapshotRef;
-                const hostSnapshotRef = snapshotRef && snapshotHostDir && snapshotRef.startsWith('/var/lib/gateway/snapshots/')
-                  ? join(snapshotHostDir, basename(snapshotRef)) : snapshotRef ?? undefined;
-                const artifactDirectory = snapshotHostDir ?? process.env.SNAPSHOT_STORAGE_PATH ?? '/var/lib/gateway/snapshots';
-                if (hostSnapshotRef !== artifactSnapshotPath(artifactDirectory, claim.siteId, claim.releaseId)) throw new Error('Invalid managed artifact path');
-                await ensureArtifactReadable(artifactDirectory, claim.siteId, claim.releaseId, selected.rows[0].checksum);
-                const containerId = await adapter.startCandidate({ ...candidate, workspaceId: claim.workspaceId, credential, gatewayUrl, hostPort: candidatePort,
-                  snapshotRef: hostSnapshotRef });
+                const hostSnapshotRef =
+                  snapshotRef &&
+                  snapshotHostDir &&
+                  snapshotRef.startsWith("/var/lib/gateway/snapshots/")
+                    ? join(snapshotHostDir, basename(snapshotRef))
+                    : (snapshotRef ?? undefined);
+                const artifactDirectory =
+                  snapshotHostDir ??
+                  process.env.SNAPSHOT_STORAGE_PATH ??
+                  "/var/lib/gateway/snapshots";
+                if (
+                  hostSnapshotRef !==
+                  artifactSnapshotPath(
+                    artifactDirectory,
+                    claim.siteId,
+                    claim.releaseId,
+                  )
+                )
+                  throw new Error("Invalid managed artifact path");
+                await ensureArtifactReadable(
+                  artifactDirectory,
+                  claim.siteId,
+                  claim.releaseId,
+                  selected.rows[0].checksum,
+                );
+                const containerId = await adapter.startCandidate({
+                  ...candidate,
+                  workspaceId: claim.workspaceId,
+                  credential,
+                  gatewayUrl,
+                  hostPort: candidatePort,
+                  snapshotRef: hostSnapshotRef,
+                });
                 containerPorts.set(containerId, candidatePort);
                 return containerId;
               },
-              removeCandidate: async containerId => {
-                await claimDocker.request({ method: 'DELETE', path: `/containers/${containerId}?force=true` });
+              removeCandidate: async (containerId) => {
+                await claimDocker.request({
+                  method: "DELETE",
+                  path: `/containers/${containerId}?force=true`,
+                });
                 containerPorts.delete(containerId);
               },
-              waitHealthy: async containerId => {
+              waitHealthy: async (containerId) => {
                 const port = containerPorts.get(containerId);
                 if (!port) return false;
-                for (let attempt = 0; attempt < 25 && Date.now() < claim.leaseUntil.getTime() - 5000; attempt++) {
-                  if (await checkCandidate(port, 'localhost')) return true;
-                  await new Promise(resolve => setTimeout(resolve, 1000));
+                for (
+                  let attempt = 0;
+                  attempt < 25 &&
+                  Date.now() < claim.leaseUntil.getTime() - 5000;
+                  attempt++
+                ) {
+                  if (await checkCandidate(port, "localhost")) return true;
+                  await new Promise((resolve) => setTimeout(resolve, 1000));
                 }
                 return false;
               },
-              checkRepresentativeHost: (containerId, host) => checkCandidate(containerPorts.get(containerId)!, host, '/'),
-              applyRoute: (siteId, revision, containerId, host, token, redirectHosts) => router.applyRoute(siteId, revision, containerPorts.get(containerId)!, host, token, containerId, claim.releaseId, redirectHosts),
-              verifyRoute: (siteId, revision, host) => router.verifyRoute(siteId, revision, host),
-              restoreRoute: (siteId, token, previous) => router.restoreRoute(siteId, token, previous),
-              finalizeAfterRouteVerification: input => finalizeAfterRouteVerification(pool, input),
-              failPublishOperation: input => failPublishOperation(pool, input),
+              checkRepresentativeHost: (containerId, host) =>
+                checkCandidate(containerPorts.get(containerId)!, host, "/"),
+              applyRoute: (
+                siteId,
+                revision,
+                containerId,
+                host,
+                token,
+                redirectHosts,
+              ) =>
+                router.applyRoute(
+                  siteId,
+                  revision,
+                  containerPorts.get(containerId)!,
+                  host,
+                  token,
+                  containerId,
+                  claim.releaseId,
+                  redirectHosts,
+                ),
+              verifyRoute: (siteId, revision, host) =>
+                router.verifyRoute(siteId, revision, host),
+              restoreRoute: (siteId, token, previous) =>
+                router.restoreRoute(siteId, token, previous),
+              finalizeAfterRouteVerification: (input) =>
+                finalizeAfterRouteVerification(pool, input),
+              failPublishOperation: (input) =>
+                failPublishOperation(pool, {
+                  ...input,
+                  ...(input.failureCode === "CANDIDATE_START_FAILED"
+                    ? { retryCode: "docker_unavailable" as const }
+                    : {}),
+                }),
             });
-          } catch (error) { console.error('Publish operation failed:', error instanceof Error ? error.message : 'unknown'); }
-        } else await new Promise(resolve => setTimeout(resolve, 1000));
+          } catch (error) {
+            console.error(
+              "Publish operation failed:",
+              error instanceof Error ? error.message : "unknown",
+            );
+          }
+        } else await new Promise((resolve) => setTimeout(resolve, 1000));
       } catch (error) {
-        console.error('Worker cycle failed:', error instanceof Error ? error.message : 'unknown');
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.error(
+          "Worker cycle failed:",
+          error instanceof Error ? error.message : "unknown",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
-  } finally { await pool.end(); }
+  } finally {
+    await pool.end();
+  }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runWorker().catch(error => { console.error(error instanceof Error ? error.message : 'Worker failed'); process.exitCode = 1; });
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  runWorker().catch((error) => {
+    console.error(error instanceof Error ? error.message : "Worker failed");
+    process.exitCode = 1;
+  });
 }

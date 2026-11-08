@@ -8,38 +8,39 @@ datasource db {
 }
 
 model Workspace {
-  id         String             @id @default(uuid()) @db.Uuid
-  name       String
-  sourceBindings SourceWorkspaceBinding[]
-  sites      Site[]
-  leads      Lead[]
+  id              String                   @id @default(uuid()) @db.Uuid
+  name            String
+  sourceBindings  SourceWorkspaceBinding[]
+  sites           Site[]
+  leads           Lead[]
   analyticsEvents AnalyticsEvent[]
-  operations PublishOperation[]
-  createdAt  DateTime           @default(now()) @db.Timestamptz(6)
-  updatedAt  DateTime           @updatedAt @db.Timestamptz(6)
+  operations      PublishOperation[]
+  createdAt       DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime                 @updatedAt @db.Timestamptz(6)
 }
 
 model Site {
-  domainChange DomainChange?
-  id                String             @id @default(uuid()) @db.Uuid
-  workspaceId       String             @db.Uuid
-  workspace         Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
-  sourceBinding     SourceSiteBinding?
-  templatePins      TemplatePin[]
-  releases          Release[]
-  releaseArtifacts  ReleaseArtifact[]
-  domains           Domain[]
-  operations        PublishOperation[]
-  deployments       ActiveDeployment[]
-  deploymentHistory Deployment[]
-  leads             Lead[]
-  analyticsEvents   AnalyticsEvent[]
-  publication       Publication?
-  desiredRevision   Int                @default(0)
-  desiredReleaseId  String?
-  credentialHash    String?
-  createdAt         DateTime           @default(now()) @db.Timestamptz(6)
-  updatedAt         DateTime           @updatedAt @db.Timestamptz(6)
+  domainChange         DomainChange?
+  id                   String             @id @default(uuid()) @db.Uuid
+  workspaceId          String             @db.Uuid
+  workspace            Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  sourceBinding        SourceSiteBinding?
+  templatePins         TemplatePin[]
+  releases             Release[]
+  releaseArtifacts     ReleaseArtifact[]
+  domains              Domain[]
+  operations           PublishOperation[]
+  deployments          ActiveDeployment[]
+  deploymentHistory    Deployment[]
+  leads                Lead[]
+  analyticsEvents      AnalyticsEvent[]
+  publication          Publication?
+  desiredRevision      Int                @default(0)
+  desiredReleaseId     String?
+  credentialHash       String?
+  lastPublishStartedAt DateTime?          @db.Timestamptz(6)
+  createdAt            DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime           @updatedAt @db.Timestamptz(6)
 
   @@unique([workspaceId, id])
   @@index([workspaceId])
@@ -93,46 +94,46 @@ model ReleaseArtifact {
 }
 
 model DomainChange {
-  siteId String @id @db.Uuid
-  site Site @relation(fields: [siteId], references: [id], onDelete: Restrict)
-  id String @unique @db.Uuid
-  domainId String @db.Uuid
-  operation String
-  enabled Boolean?
-  status String @default("pending")
-  error String?
-  updatedAt DateTime @default(now()) @db.Timestamptz(6)
+  siteId     String   @id @db.Uuid
+  site       Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  id         String   @unique @db.Uuid
+  domainId   String   @db.Uuid
+  operation  String
+  enabled    Boolean?
+  status     String   @default("pending")
+  error      String?
+  updatedAt  DateTime @default(now()) @db.Timestamptz(6)
   retryAfter DateTime @default(now()) @db.Timestamptz(6)
 }
 
 model Domain {
   verificationTokenHash String?
-  verificationExpiresAt DateTime? @db.Timestamptz(6)
-  lastError String?
-  id                String   @id @default(uuid()) @db.Uuid
-  siteId            String   @db.Uuid
-  site              Site     @relation(fields: [siteId], references: [id], onDelete: Restrict)
-  sourceBindings    SourceSiteBinding[]
-  hostname          String   @unique
-  status            String   @default("pending")
-  ownershipStatus   String   @default("pending")
-  dnsStatus         String   @default("pending")
-  certificateStatus String   @default("pending")
-  enabled           Boolean  @default(true)
-  isPrimary         Boolean  @default(false)
-  lastCheckedAt     DateTime?
-  createdAt         DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt         DateTime @updatedAt @db.Timestamptz(6)
+  verificationExpiresAt DateTime?           @db.Timestamptz(6)
+  lastError             String?
+  id                    String              @id @default(uuid()) @db.Uuid
+  siteId                String              @db.Uuid
+  site                  Site                @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  sourceBindings        SourceSiteBinding[]
+  hostname              String              @unique
+  status                String              @default("pending")
+  ownershipStatus       String              @default("pending")
+  dnsStatus             String              @default("pending")
+  certificateStatus     String              @default("pending")
+  enabled               Boolean             @default(true)
+  isPrimary             Boolean             @default(false)
+  lastCheckedAt         DateTime?
+  createdAt             DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime            @updatedAt @db.Timestamptz(6)
 
   @@unique([siteId, id])
 }
 
 model Lead {
-  id                 String   @id @default(uuid()) @db.Uuid
-  workspaceId        String   @db.Uuid
-  siteId             String   @db.Uuid
+  id                 String    @id @default(uuid()) @db.Uuid
+  workspaceId        String    @db.Uuid
+  siteId             String    @db.Uuid
   source             String
-  schemaVersion      Int      @default(1)
+  schemaVersion      Int       @default(1)
   name               String?
   email              String?
   phone              String?
@@ -140,13 +141,13 @@ model Lead {
   fields             Json
   dedupeKey          String
   ipHash             String?
-  status             String   @default("new")
+  status             String    @default("new")
   assignedTo         String?
   notes              String?
-  notificationStatus String   @default("pending")
+  notificationStatus String    @default("pending")
   notificationError  String?
-  createdAt          DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt          DateTime @updatedAt @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @db.Timestamptz(6)
   workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   site               Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
 
@@ -156,25 +157,25 @@ model Lead {
 }
 
 model AnalyticsEvent {
-  id          String   @id @default(uuid()) @db.Uuid
-  workspaceId String   @db.Uuid
-  siteId      String   @db.Uuid
-  eventId     String   @db.Uuid
+  id          String    @id @default(uuid()) @db.Uuid
+  workspaceId String    @db.Uuid
+  siteId      String    @db.Uuid
+  eventId     String    @db.Uuid
   releaseId   String?
-  eventType   String   @default("page_view")
+  eventType   String    @default("page_view")
   path        String
   referrer    String?
   device      String?
   visitorHash String?
   sessionHash String?
-  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   site        Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
 
+  @@unique([siteId, eventId])
   @@index([siteId, createdAt])
   @@index([siteId, path, createdAt])
   @@index([siteId, eventType, createdAt])
-  @@unique([siteId, eventId])
 }
 
 model Publication {
@@ -203,9 +204,11 @@ model PublishOperation {
   desiredRevision         Int
   status                  String    @default("pending")
   failureCode             String?
+  lastFailureCode         String?
   leaseOwner              String?
   leaseUntil              DateTime? @db.Timestamptz(6)
   attempts                Int       @default(0)
+  nextAttemptAt           DateTime? @db.Timestamptz(6)
   candidateCredentialHash String?
   createdAt               DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt               DateTime  @updatedAt @db.Timestamptz(6)
@@ -213,6 +216,7 @@ model PublishOperation {
   @@unique([siteId, idempotencyKey])
   @@index([siteId, status])
   @@index([status, leaseUntil, createdAt], map: "PublishOperation_claim_idx")
+  @@index([status, nextAttemptAt], map: "PublishOperation_retry_idx")
 }
 
 model ActiveDeployment {
@@ -247,8 +251,8 @@ model Deployment {
 model SourceWorkspaceBinding {
   instanceId     String
   cmsWorkspaceId String
-  workspaceId    String @db.Uuid
-  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  workspaceId    String              @db.Uuid
+  workspace      Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   sites          SourceSiteBinding[]
 
   @@id([instanceId, cmsWorkspaceId])
@@ -256,16 +260,16 @@ model SourceWorkspaceBinding {
 }
 
 model SourceSiteBinding {
-  instanceId     String
-  cmsWorkspaceId String
-  cmsSiteId      String
-  workspaceId    String @db.Uuid
-  siteId         String @unique @db.Uuid
-  requestKey     String
-  defaultDomainId String @db.Uuid
-  defaultDomain  Domain @relation(fields: [siteId, defaultDomainId], references: [siteId, id], onDelete: Restrict, map: "SourceSiteBinding_defaultDomain_fkey")
+  instanceId      String
+  cmsWorkspaceId  String
+  cmsSiteId       String
+  workspaceId     String                 @db.Uuid
+  siteId          String                 @unique @db.Uuid
+  requestKey      String
+  defaultDomainId String                 @db.Uuid
+  defaultDomain   Domain                 @relation(fields: [siteId, defaultDomainId], references: [siteId, id], onDelete: Restrict, map: "SourceSiteBinding_defaultDomain_fkey")
   sourceWorkspace SourceWorkspaceBinding @relation(fields: [instanceId, cmsWorkspaceId, workspaceId], references: [instanceId, cmsWorkspaceId, workspaceId], onDelete: Restrict, map: "SourceSiteBinding_sourceWorkspace_fkey")
-  site           Site @relation(fields: [workspaceId, siteId], references: [workspaceId, id], onDelete: Restrict, map: "SourceSiteBinding_site_fkey")
+  site            Site                   @relation(fields: [workspaceId, siteId], references: [workspaceId, id], onDelete: Restrict, map: "SourceSiteBinding_site_fkey")
 
   @@id([instanceId, cmsWorkspaceId, cmsSiteId])
   @@unique([instanceId, requestKey])
