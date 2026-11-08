@@ -4,7 +4,7 @@ import type { Pool } from "pg";
 import {
   readPublishFailureCount15m,
   readPublishQueueObservation,
-} from "../../../packages/worker/src/operations";
+} from "../../../packages/worker/src/observability";
 import { readPublishLimits } from "../../../packages/worker/src/claim";
 import { readPublishQuota } from "./publish";
 import {
