@@ -3,7 +3,10 @@ import { link, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { canonicalJson, validateReleaseInput } from "@gateway/contracts";
-import { ensureMigrationArtifactRecord } from "./migrations/artifacts";
+import {
+  ArtifactIdentityConflict,
+  ensureMigrationArtifactRecord,
+} from "./migrations/artifacts";
 import {
   authenticateSiteService,
   ServiceScopeError,
@@ -196,6 +199,11 @@ export async function receiveRelease(
       (error instanceof Error && error.message === "Unauthorized")
     )
       return serviceScopeErrorResponse(error);
+    if (error instanceof ArtifactIdentityConflict)
+      return Response.json(
+        { error: "artifact_identity_conflict" },
+        { status: 409 },
+      );
     if (
       error instanceof SyntaxError ||
       (error instanceof Error &&
