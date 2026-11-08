@@ -118,9 +118,7 @@ export async function claimPublishOperation(
           AND (operation."leaseUntil" IS NULL OR operation."leaseUntil" < clock_timestamp())
           AND (operation."nextAttemptAt" IS NULL OR operation."nextAttemptAt" <= clock_timestamp())
           AND operation."failureCode" IS DISTINCT FROM 'ROUTE_SWITCH_FAILED'
-          AND NOT EXISTS (
-            SELECT 1 FROM active WHERE active."siteId" = operation."siteId"
-          )
+          AND (SELECT COUNT(*) FROM active WHERE active."siteId" = operation."siteId") < $6
           AND (SELECT COUNT(*) FROM active) < $3
           AND (SELECT COUNT(*) FROM active WHERE active."workspaceId" = operation."workspaceId") < $4
           AND (site."lastPublishStartedAt" IS NULL OR
@@ -147,6 +145,7 @@ export async function claimPublishOperation(
         limits.maxGlobalLeases,
         limits.maxWorkspaceLeases,
         limits.siteStartIntervalMs,
+        limits.maxSiteLeases,
       ],
     );
     const claimed = result.rows[0] ?? null;

@@ -16,7 +16,7 @@ import {
   collectRetiredContainers,
   createRetirementClient,
 } from "./retirement.js";
-import { pullApprovedImage } from "./pull.js";
+import { pullApprovedImage, retryCodeForDockerFailure } from "./pull.js";
 import {
   failPublishOperation,
   finalizeAfterRouteVerification,
@@ -266,14 +266,17 @@ export async function runWorker() {
             if (
               !(await pullApprovedImage(
                 () => pullDocker.pull(`${image.repository}@${image.digest}`),
-                () =>
+                (cause) =>
                   failPublishOperation(pool, {
                     operationId: claim.id,
                     workerId,
                     attempts: claim.attempts,
                     leaseUntil: claim.leaseUntil,
                     failureCode: "CANDIDATE_CREATE_FAILED",
-                    retryCode: "registry_unavailable",
+                    retryCode: retryCodeForDockerFailure(
+                      cause,
+                      "registry_unavailable",
+                    ),
                   }),
               ))
             )
@@ -430,11 +433,16 @@ export async function runWorker() {
                 router.restoreRoute(siteId, token, previous),
               finalizeAfterRouteVerification: (input) =>
                 finalizeAfterRouteVerification(pool, input),
-              failPublishOperation: (input) =>
+              failPublishOperation: (input, cause) =>
                 failPublishOperation(pool, {
                   ...input,
                   ...(input.failureCode === "CANDIDATE_START_FAILED"
-                    ? { retryCode: "docker_unavailable" as const }
+                    ? {
+                        retryCode: retryCodeForDockerFailure(
+                          cause,
+                          "docker_unavailable",
+                        ),
+                      }
                     : {}),
                 }),
             });

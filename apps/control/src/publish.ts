@@ -9,7 +9,15 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const defaultQuota = { site: 20, workspace: 100, retryAfter: 5 };
 
-function quota(env: NodeJS.ProcessEnv = process.env) {
+export interface PublishQuota {
+  site: number;
+  workspace: number;
+  retryAfter: number;
+}
+
+export function readPublishQuota(
+  env: NodeJS.ProcessEnv = process.env,
+): PublishQuota {
   const value = (name: string, fallback: number, maximum: number) => {
     const raw = env[name];
     if (raw === undefined || raw === "") return fallback;
@@ -123,7 +131,7 @@ export async function createPublishOperation(
         );
       return Response.json(operation, { status: 200 });
     }
-    const limits = quota();
+    const limits = readPublishQuota();
     const pending = await client.query<{ site: number; workspace: number }>(
       `
       SELECT COUNT(*) FILTER (WHERE "siteId" = $2)::integer AS site,

@@ -348,3 +348,51 @@ test(
     }
   },
 );
+
+test(
+  "uses the configured per-site lease limit instead of a hardcoded one",
+  { skip: !pool },
+  async () => {
+    await pool!.query(
+      'UPDATE "PublishOperation" SET "status"=\'failed\',"leaseOwner"=NULL,"leaseUntil"=NULL WHERE "status"=\'pending\'',
+    );
+    await insertOperation(siteA, "a", 50);
+    await insertOperation(siteA, "a", 51);
+    await pool!.query(
+      'UPDATE "Site" SET "lastPublishStartedAt"=NULL WHERE "id"=$1',
+      [siteA],
+    );
+    const configured = {
+      maxSiteLeases: 2,
+      maxWorkspaceLeases: 3,
+      maxGlobalLeases: 4,
+      siteStartIntervalMs: 1_000,
+    };
+    const first = await claimPublishOperation(
+      pool!,
+      "site-limit-1",
+      60,
+      configured,
+    );
+    assert.equal(first?.siteId, siteA);
+    await pool!.query(
+      'UPDATE "Site" SET "lastPublishStartedAt"=now()-interval \'2 seconds\' WHERE "id"=$1',
+      [siteA],
+    );
+    const second = await claimPublishOperation(
+      pool!,
+      "site-limit-2",
+      60,
+      configured,
+    );
+    assert.equal(second?.siteId, siteA);
+    await pool!.query(
+      'UPDATE "Site" SET "lastPublishStartedAt"=now()-interval \'2 seconds\' WHERE "id"=$1',
+      [siteA],
+    );
+    assert.equal(
+      await claimPublishOperation(pool!, "site-limit-3", 60, configured),
+      null,
+    );
+  },
+);
